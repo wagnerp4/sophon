@@ -1,0 +1,8 @@
+[project]
+name = "lmwrap"
+version = "0.1.0"
+description = "Utilities around Gemma 4 Hub weights (uv-managed)."
+requires-python = ">=3.10"
+dependencies = [
+    "huggingface-hub>=0.28.0",
+]
