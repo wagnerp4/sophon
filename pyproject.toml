@@ -1,8 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "lmwrap"
 version = "0.1.0"
 description = "Utilities around Gemma 4 Hub weights (uv-managed)."
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.13.0",
+    "bitsandbytes>=0.45.0",
     "huggingface-hub>=0.28.0",
+    "pillow>=12.2.0",
+    "pyqt6>=6.6.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=4.50.0",
 ]
+
+[project.scripts]
+lmwrap-infer = "lmwrap.inference:main"
+lmwrap-chat = "lmwrap.chat_ui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lmwrap"]
