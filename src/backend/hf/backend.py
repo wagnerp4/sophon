@@ -12,40 +12,14 @@ from typing import Any
 
 import torch
 import transformers.modeling_utils as modeling_utils
-from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoProcessor
+
+from backend.hf.const import BUILTIN_SPECIAL_TOKEN_PATTERNS
+from backend.shared import bitsandbytes_config
 
 
 _orig_caching_allocator_warmup = modeling_utils.caching_allocator_warmup
 _mps_warmup_patch_installed = False
-
-
-_BUILTIN_SPECIAL_TOKEN_PATTERNS: tuple[str, ...] = (
-    r"</s>",
-    r"<s>",
-    r"<\|endoftext\|>",
-    r"<\|end_of_text\|>",
-    r"<\|begin_of_text\|>",
-    r"<\|eot_id\|>",
-    r"<\|start_header_id\|>",
-    r"<\|end_header_id\|>",
-    r"<\|im_start\|>",
-    r"<\|im_end\|>",
-    r"<\|user\|>",
-    r"<\|assistant\|>",
-    r"<\|system\|>",
-    r"<\|turn>[a-zA-Z_]+\n",
-    r"<\|channel>[a-zA-Z_]+\n",
-    r"<\|think\|>",
-    r"<\|tool>",
-    r"<\|tool_call>[^\s]*",
-    r"<\|tool_response>",
-    r"<\|image\|>",
-    r"<\|audio\|>",
-    r"<\|video\|>",
-    r"<bos>",
-    r"<eos>",
-    r"<pad>",
-)
 
 
 @dataclass
@@ -94,21 +68,6 @@ def install_mps_allocator_warmup_shim() -> None:
 
 def mps_ready() -> bool:
     return bool(torch.backends.mps.is_available() and torch.backends.mps.is_built())
-
-
-def bitsandbytes_config(mode: str) -> BitsAndBytesConfig | None:
-    if mode == "none":
-        return None
-    if mode == "8bit":
-        return BitsAndBytesConfig(load_in_8bit=True)
-    if mode == "4bit":
-        return BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
-    raise ValueError(mode)
 
 
 def _make_ui_tqdm_hook(on_load_progress: Callable[[int, int, str], None]) -> Callable[..., Any]:
@@ -291,7 +250,7 @@ def load_processor_and_model(
 
 
 def _build_strip_pattern(extra_specials: list[str] | None = None) -> re.Pattern[str]:
-    parts: list[str] = list(_BUILTIN_SPECIAL_TOKEN_PATTERNS)
+    parts: list[str] = list(BUILTIN_SPECIAL_TOKEN_PATTERNS)
     if extra_specials:
         for tok in extra_specials:
             if not isinstance(tok, str) or not tok:

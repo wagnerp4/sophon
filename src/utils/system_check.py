@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_src_root = Path(__file__).resolve().parent.parent
+_src_root_s = str(_src_root)
+if _src_root_s not in sys.path:
+    sys.path.insert(0, _src_root_s)
+
+# Todo: remove this path bootstrap after the package uses consistent lmwrap.* imports end-to-end.
+
 import argparse
 import ctypes
 import json
@@ -7,13 +17,11 @@ import os
 import platform
 import re
 import subprocess
-import sys
-from pathlib import Path
 from typing import Any
 
-from lmwrap.backend.gemma_backend import mps_ready
-from lmwrap.backend.gemma_paths import infer_default_quantization, resolve_local_model_dir
-from lmwrap.utils.env_bootstrap import load_lmwrap_dotenv
+from backend.hf.backend import mps_ready
+from backend.hf.paths import infer_default_quantization, resolve_local_model_dir
+from utils.env_bootstrap import load_lmwrap_dotenv
 
 
 def _fmt_bytes(n: int) -> str:

@@ -6,8 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from lmwrap.utils.env_bootstrap import load_lmwrap_dotenv, lmwrap_project_root
-from lmwrap.utils.registry import HF_MODEL_PRESETS, default_preset_key, resolve_preset_dir
+from utils.env_bootstrap import load_lmwrap_dotenv, lmwrap_project_root
+from utils.registry import HF_MODEL_PRESETS, default_preset_key, resolve_preset_dir
 
 
 def build_hf_download_argv(

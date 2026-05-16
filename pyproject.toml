@@ -13,6 +13,7 @@ dependencies = [
     "huggingface-hub>=0.28.0",
     "pillow>=12.2.0",
     "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "transformers>=4.50.0",
@@ -20,16 +21,33 @@ dependencies = [
 ]
 
 [project.scripts]
-lmwrap-infer = "lmwrap.app.inference:main"
-lmwrap-chat-cli = "lmwrap.app.chat_cli:main"
+lmwrap-infer = "lmwrap.cli.inference:main"
+lmwrap-chat-cli = "lmwrap.cli.chat:main"
 lmwrap-download-hf = "lmwrap.utils.download_hf_model:main"
 lmwrap-download-hf-debug = "lmwrap.utils.download_hf_model:main_debug"
 lmwrap-hf-download = "lmwrap.utils.hf_download_cli:main"
-lmwrap-system-check = "lmwrap.app.system_check:main"
+lmwrap-system-check = "lmwrap.utils.system_check:main"
+lmwrap-benchmark = "lmwrap.eval.benchmark:main"
+
+[project.optional-dependencies]
+rag = []
+rag-leann = ["leann>=0.3.8"]
 
 [tool.setuptools]
 package-dir = {"lmwrap" = "src"}
-packages = ["lmwrap", "lmwrap.app", "lmwrap.backend", "lmwrap.utils"]
+packages = [
+    "lmwrap",
+    "lmwrap.backend",
+    "lmwrap.backend.hf",
+    "lmwrap.backend.ollama",
+    "lmwrap.cli",
+    "lmwrap.context",
+    "lmwrap.eval",
+    "lmwrap.memory",
+    "lmwrap.retrieval",
+    "lmwrap.retrieval.backends",
+    "lmwrap.utils",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

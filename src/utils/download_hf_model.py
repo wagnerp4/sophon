@@ -12,8 +12,8 @@ from huggingface_hub.errors import GatedRepoError
 from huggingface_hub.utils import enable_progress_bars
 from tqdm.auto import tqdm as TqdmAuto
 
-from lmwrap.utils.env_bootstrap import DOTENV_LOAD_PATH, load_lmwrap_dotenv
-from lmwrap.utils.registry import HF_MODEL_PRESETS, preset_summary_lines, resolve_preset_dir
+from utils.env_bootstrap import DOTENV_LOAD_PATH, load_lmwrap_dotenv
+from utils.registry import HF_MODEL_PRESETS, preset_summary_lines, resolve_preset_dir
 
 _DEBUG_DEFAULT_PRESET = "llama2_7b_chat"
 

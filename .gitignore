@@ -10,3 +10,6 @@ dist/
 build/
 models/
 .env
+data/*
+!data/README.md
+evaluation_runs/

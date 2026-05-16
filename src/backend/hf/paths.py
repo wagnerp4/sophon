@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-DEFAULT_LOCAL_DIR = "models/meta-llama-Llama-2-7b-chat-hf"
+from backend.hf.const import DEFAULT_LOCAL_DIR
 
 
 def qbit_to_quantization(qbit: int) -> str:
