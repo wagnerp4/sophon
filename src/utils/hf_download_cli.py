@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from utils.env_bootstrap import load_lmwrap_dotenv, lmwrap_project_root
+from utils.env_bootstrap import load_mithril_dotenv, mithril_project_root
 from utils.registry import HF_MODEL_PRESETS, default_preset_key, resolve_preset_dir
 
 
@@ -51,26 +51,26 @@ def format_hf_download_cmd_for_display(cmd: list[str]) -> str:
 
 
 def main() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     preset_keys = sorted(HF_MODEL_PRESETS.keys())
     parser = argparse.ArgumentParser(
         description=(
             "Download a Hub model using the official Hugging Face CLI "
             "(python -m huggingface_hub.cli.hf download). "
-            "Loads .env / HF_TOKEN like other lmwrap commands."
+            "Loads .env / HF_TOKEN like other mithril commands."
         ),
     )
     parser.add_argument(
         "repo_id",
         nargs="?",
         default=None,
-        help="Hub repo id. Omit with --preset, or omit both to use LMWRAP_HF_PRESET/model scan/registry fallback.",
+        help="Hub repo id. Omit with --preset, or omit both to use MITHRIL_HF_PRESET/model scan/registry fallback.",
     )
     parser.add_argument(
         "--preset",
         choices=preset_keys,
         default=None,
-        help="Preset from lmwrap registry. Omit repo_id alone for models/<slug>; omit both for default_preset_key().",
+        help="Preset from mithril registry. Omit repo_id alone for models/<slug>; omit both for default_preset_key().",
     )
     parser.add_argument(
         "--local-dir",
@@ -84,7 +84,7 @@ def main() -> None:
         help="Base for relative paths (default: directory containing pyproject.toml).",
     )
     args = parser.parse_args()
-    root = Path(args.project_root).expanduser().resolve() if args.project_root else lmwrap_project_root()
+    root = Path(args.project_root).expanduser().resolve() if args.project_root else mithril_project_root()
 
     if args.preset is not None:
         effective_preset: str | None = args.preset
@@ -95,7 +95,7 @@ def main() -> None:
 
     revision = args.revision
     if revision is None:
-        revision = os.environ.get("LMWRAP_HF_REVISION", "").strip() or None
+        revision = os.environ.get("MITHRIL_HF_REVISION", "").strip() or None
 
     repo_id: str
     dest: Path
@@ -121,5 +121,5 @@ def main() -> None:
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = build_hf_download_argv(repo_id, dest, revision=revision)
-    print("lmwrap-hf-download:", " ".join(_mask_argv_for_print(cmd)), file=sys.stderr, flush=True)
+    print("mithril-hf-download:", " ".join(_mask_argv_for_print(cmd)), file=sys.stderr, flush=True)
     raise SystemExit(subprocess.call(cmd, cwd=str(root)))

@@ -8,7 +8,7 @@ _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent lmwrap.* imports end-to-end.
+# Todo: remove this path bootstrap after the package uses consistent mithril.* imports end-to-end.
 
 import argparse
 import datetime as _dt
@@ -38,7 +38,8 @@ from backend.hf.paths import (
 from context import ContextBuildResult, build_messages_for_model
 from memory import MemoryScope, MemoryStore, open_memory_store
 from retrieval import RagRetriever, RetrievalQuery, RetrievalResult, load_rag_retriever, rag_retriever_ids
-from utils.env_bootstrap import load_lmwrap_dotenv, lmwrap_project_root
+from utils.env_bootstrap import load_mithril_dotenv, mithril_project_root
+from utils.qwen_tts_speaker import LazyQwenCustomVoiceTts, register_tts_cli_args, speak_custom_voice_blocking
 from utils.registry import preset_keys_sorted, resolve_preset_dir
 
 
@@ -71,6 +72,15 @@ class _SessionState:
     memory_scope: MemoryScope | None = None
     memory_recall_turns: int = 6
     _last_persisted_user_obj_id: int = 0
+    tts_enabled: bool = False
+    tts_plain_text: bool = True
+    tts_model_id: str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+    tts_speaker: str = "Ryan"
+    tts_language: str = "English"
+    tts_instruct: str | None = None
+    tts_max_chars: int = 8000
+    tts_device: str | None = None
+    tts_engine: LazyQwenCustomVoiceTts | None = None
 
 
 def _thinking_default(cli_flag: bool | None) -> bool:
@@ -287,7 +297,7 @@ def _cmd_rag_status(state: _SessionState, _arg: str) -> bool:
 @_register("memory-status", "Show memory store and session info.")
 def _cmd_memory_status(state: _SessionState, _arg: str) -> bool:
     if state.memory is None or state.memory_scope is None:
-        _emit("memory: disabled (pass --memory-db or set LMWRAP_MEMORY_DB)")
+        _emit("memory: disabled (pass --memory-db or set MITHRIL_MEMORY_DB)")
         return False
     try:
         recent = state.memory.load_recent_turns(state.memory_scope, max(state.memory_recall_turns, 1))
@@ -299,6 +309,86 @@ def _cmd_memory_status(state: _SessionState, _arg: str) -> bool:
         f"memory: session={scope.session_id} user={scope.user_id} "
         f"recall_turns={state.memory_recall_turns} loaded={len(recent)}"
     )
+    return False
+
+
+@_register("tts", "TTS playback after replies: /tts on | off | show.")
+def _cmd_tts(state: _SessionState, arg: str) -> bool:
+    a = arg.strip().lower()
+    if a in ("on", "1", "true", "yes"):
+        state.tts_enabled = True
+        _emit("(tts enabled)")
+    elif a in ("off", "0", "false", "no"):
+        state.tts_enabled = False
+        _emit("(tts disabled)")
+    elif a in ("show", "") or not arg.strip():
+        ins = repr(state.tts_instruct) if state.tts_instruct else "(none)"
+        _emit(
+            f"tts: {'on' if state.tts_enabled else 'off'} "
+            f"speaker={state.tts_speaker!r} lang={state.tts_language!r} "
+            f"plain={state.tts_plain_text} model={state.tts_model_id!r} instruct={ins}"
+        )
+    else:
+        _emit("usage: /tts on | off | show")
+    return False
+
+
+@_register("tts-speaker", "Set CustomVoice speaker name (e.g. Ryan, Aiden, Vivian).")
+def _cmd_tts_speaker(state: _SessionState, arg: str) -> bool:
+    if not arg.strip():
+        _emit(f"tts speaker = {state.tts_speaker!r}")
+        return False
+    state.tts_speaker = arg.strip()
+    _emit(f"(tts speaker = {state.tts_speaker!r})")
+    return False
+
+
+@_register("tts-lang", "Set TTS language label (e.g. English, Chinese).")
+def _cmd_tts_lang(state: _SessionState, arg: str) -> bool:
+    if not arg.strip():
+        _emit(f"tts language = {state.tts_language!r}")
+        return False
+    state.tts_language = arg.strip()
+    _emit(f"(tts language = {state.tts_language!r})")
+    return False
+
+
+@_register("tts-instruct", "Set style instruct for TTS, or: /tts-instruct clear.")
+def _cmd_tts_instruct(state: _SessionState, arg: str) -> bool:
+    a = arg.strip()
+    if a.lower() in ("", "clear", "none"):
+        state.tts_instruct = None
+        _emit("(tts instruct cleared)")
+        return False
+    state.tts_instruct = a
+    _emit("(tts instruct updated)")
+    return False
+
+
+@_register("tts-plain", "Strip markdown fences before TTS: /tts-plain on | off | show.")
+def _cmd_tts_plain(state: _SessionState, arg: str) -> bool:
+    a = arg.strip().lower()
+    if a in ("on", "1", "true", "yes"):
+        state.tts_plain_text = True
+        _emit("(tts plain = on)")
+    elif a in ("off", "0", "false", "no"):
+        state.tts_plain_text = False
+        _emit("(tts plain = off)")
+    elif a in ("show", "") or not arg.strip():
+        _emit(f"tts plain = {'on' if state.tts_plain_text else 'off'}")
+    else:
+        _emit("usage: /tts-plain on | off | show")
+    return False
+
+
+@_register("tts-model", "Set CustomVoice HF repo id (reloads engine on next synthesis).")
+def _cmd_tts_model(state: _SessionState, arg: str) -> bool:
+    if not arg.strip():
+        _emit(f"tts model = {state.tts_model_id!r}")
+        return False
+    state.tts_model_id = arg.strip()
+    state.tts_engine = None
+    _emit("(tts model updated)")
     return False
 
 
@@ -525,6 +615,27 @@ def _persist_turn_after_success(state: _SessionState) -> None:
         _emit(f"(memory persist failed: {exc})")
 
 
+def _tts_engine_singleton(state: _SessionState) -> LazyQwenCustomVoiceTts:
+    if state.tts_engine is None:
+        state.tts_engine = LazyQwenCustomVoiceTts(state.tts_model_id, state.tts_device)
+    return state.tts_engine
+
+
+def _maybe_play_assistant_tts(state: _SessionState, text: str) -> None:
+    if not state.tts_enabled:
+        return
+    speak_custom_voice_blocking(
+        engine=_tts_engine_singleton(state),
+        text=text,
+        speaker=state.tts_speaker,
+        language=state.tts_language,
+        instruct=state.tts_instruct,
+        max_chars=max(state.tts_max_chars, 1),
+        emit=_emit,
+        plain_text=state.tts_plain_text,
+    )
+
+
 def _run_generation(state: _SessionState) -> None:
     cancelled = {"flag": False}
     prev_handler = signal.getsignal(signal.SIGINT)
@@ -583,6 +694,8 @@ def _run_generation(state: _SessionState) -> None:
     print(text)
     print(flush=True)
 
+    _maybe_play_assistant_tts(state, text)
+
     state.stats.record_turn(
         input_tokens=result.input_tokens,
         new_tokens=result.new_tokens,
@@ -616,7 +729,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Registry key: load models/<Hub-id-with-dashes> under the project root "
-            "(matches lmwrap-hf-download --preset). Mutually exclusive with --model."
+            "(matches mithril-hf-download --preset). Mutually exclusive with --model."
         ),
     )
     parser.add_argument(
@@ -658,7 +771,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--debug",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Print one-line stats footer after each reply. Env: LMWRAP_CHAT_DEBUG.",
+        help="Print one-line stats footer after each reply. Env: MITHRIL_CHAT_DEBUG.",
     )
     parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature.")
     parser.add_argument("--top-p", type=float, default=None, help="Nucleus sampling top_p.")
@@ -673,53 +786,54 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rag",
         choices=list(rag_retriever_ids()),
-        default=os.environ.get("LMWRAP_RAG", "noop"),
-        help="Retrieval backend (noop disables retrieval). Env: LMWRAP_RAG.",
+        default=os.environ.get("MITHRIL_RAG", "noop"),
+        help="Retrieval backend (noop disables retrieval). Env: MITHRIL_RAG.",
     )
     parser.add_argument(
         "--rag-index",
-        default=os.environ.get("LMWRAP_LEANN_INDEX") or None,
-        help="LEANN index basename for --rag leann. Env: LMWRAP_LEANN_INDEX.",
+        default=os.environ.get("MITHRIL_LEANN_INDEX") or None,
+        help="LEANN index basename for --rag leann. Env: MITHRIL_LEANN_INDEX.",
     )
     parser.add_argument(
         "--rag-top-k",
         type=int,
-        default=int(os.environ.get("LMWRAP_RAG_TOP_K", "5")),
+        default=int(os.environ.get("MITHRIL_RAG_TOP_K", "5")),
         help="Default top_k for retrieval queries.",
     )
     parser.add_argument(
         "--memory-db",
-        default=os.environ.get("LMWRAP_MEMORY_DB") or None,
-        help="SQLite path for persistent chat memory. Env: LMWRAP_MEMORY_DB.",
+        default=os.environ.get("MITHRIL_MEMORY_DB") or None,
+        help="SQLite path for persistent chat memory. Env: MITHRIL_MEMORY_DB.",
     )
     parser.add_argument(
         "--memory-session",
-        default=os.environ.get("LMWRAP_MEMORY_SESSION") or None,
-        help="Session id for memory. Default: timestamp-based id. Env: LMWRAP_MEMORY_SESSION.",
+        default=os.environ.get("MITHRIL_MEMORY_SESSION") or None,
+        help="Session id for memory. Default: timestamp-based id. Env: MITHRIL_MEMORY_SESSION.",
     )
     parser.add_argument(
         "--memory-user",
-        default=os.environ.get("LMWRAP_MEMORY_USER") or None,
-        help="Optional user id stored next to messages. Env: LMWRAP_MEMORY_USER.",
+        default=os.environ.get("MITHRIL_MEMORY_USER") or None,
+        help="Optional user id stored next to messages. Env: MITHRIL_MEMORY_USER.",
     )
     parser.add_argument(
         "--memory-recall-turns",
         type=int,
-        default=int(os.environ.get("LMWRAP_MEMORY_RECALL_TURNS", "6")),
+        default=int(os.environ.get("MITHRIL_MEMORY_RECALL_TURNS", "6")),
         help="Number of trailing memory turns to inject as context.",
     )
+    register_tts_cli_args(parser)
     return parser
 
 
 def main() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     _suppress_noisy_warnings()
 
     parser = _build_parser()
     args = parser.parse_args()
 
     enable_thinking = _thinking_default(args.thinking)
-    root = lmwrap_project_root()
+    root = mithril_project_root()
     if args.preset is not None:
         resolved_model_dir = resolve_preset_dir(args.preset, root)
     else:
@@ -762,6 +876,12 @@ def main() -> None:
         session_id = args.memory_session or _dt.datetime.now().strftime("session_%Y%m%d_%H%M%S")
         memory_scope = MemoryScope(session_id=session_id, user_id=args.memory_user)
 
+    tts_instruct = args.tts_instruct
+    if isinstance(tts_instruct, str) and tts_instruct.strip() == "":
+        tts_instruct = None
+    tts_device_arg = getattr(args, "tts_device", None)
+    tts_device = tts_device_arg.strip() if isinstance(tts_device_arg, str) and tts_device_arg.strip() else None
+
     state = _SessionState(
         processor=processor,
         model=model,
@@ -778,10 +898,18 @@ def main() -> None:
         memory=memory_store,
         memory_scope=memory_scope,
         memory_recall_turns=max(int(args.memory_recall_turns), 0),
+        tts_enabled=bool(args.tts),
+        tts_plain_text=not bool(args.tts_raw_output),
+        tts_model_id=str(args.tts_model),
+        tts_speaker=str(args.tts_speaker),
+        tts_language=str(args.tts_language),
+        tts_instruct=tts_instruct if isinstance(tts_instruct, str) else None,
+        tts_max_chars=max(int(args.tts_max_chars), 1),
+        tts_device=tts_device,
     )
 
     _emit(
-        "lmwrap chat. Type /help or ? for commands. /quit or q to exit."
+        "mithril chat. Type /help or ? for commands. /quit or q to exit."
     )
     if meta.max_position_embeddings:
         _emit(f"(model context window: {meta.max_position_embeddings} tokens)")
@@ -789,6 +917,11 @@ def main() -> None:
         _emit(f"(retrieval: {state.retriever.backend_id()} top_k={state.retrieval_top_k})")
     if state.memory is not None and state.memory_scope is not None:
         _emit(f"(memory: session={state.memory_scope.session_id} recall_turns={state.memory_recall_turns})")
+    if state.tts_enabled:
+        _emit(
+            "(tts: assistant replies will be spoken via Qwen3-TTS CustomVoice; "
+            "install extras with pip install \"mithril[tts]\")"
+        )
 
     last_sigint_ts: float = 0.0
     while not state.exit_requested:

@@ -293,5 +293,5 @@ class SessionStats:
 
 
 def initial_debug_mode_from_env() -> bool:
-    raw = os.environ.get("LMWRAP_CHAT_DEBUG", "").strip().lower()
+    raw = os.environ.get("MITHRIL_CHAT_DEBUG", "").strip().lower()
     return raw in ("1", "true", "yes", "on")

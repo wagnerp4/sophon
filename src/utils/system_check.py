@@ -8,7 +8,7 @@ _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent lmwrap.* imports end-to-end.
+# Todo: remove this path bootstrap after the package uses consistent mithril.* imports end-to-end.
 
 import argparse
 import ctypes
@@ -21,7 +21,7 @@ from typing import Any
 
 from backend.hf.backend import mps_ready
 from backend.hf.paths import infer_default_quantization, resolve_local_model_dir
-from utils.env_bootstrap import load_lmwrap_dotenv
+from utils.env_bootstrap import load_mithril_dotenv
 
 
 def _fmt_bytes(n: int) -> str:
@@ -211,9 +211,9 @@ def _choose_recommended_device() -> str:
 
 
 def main() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     parser = argparse.ArgumentParser(
-        description="Host and PyTorch device checks for lmwrap (CUDA, MPS, CPU, memory hints).",
+        description="Host and PyTorch device checks for mithril (CUDA, MPS, CPU, memory hints).",
     )
     parser.add_argument(
         "--device",
@@ -265,7 +265,7 @@ def main() -> None:
         "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
         "mps_built": bool(torch.backends.mps.is_built()),
         "mps_available": bool(torch.backends.mps.is_available()),
-        "mps_ready_lmwrap": bool(mps_ready()),
+        "mps_ready_mithril": bool(mps_ready()),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
         "gemma4_quantization_default": infer_default_quantization(),
         "host_memory": host,
@@ -323,13 +323,13 @@ def main() -> None:
         print(json.dumps(row, indent=2))
         return
 
-    print("lmwrap system check")
+    print("mithril system check")
     print(f"  python={row['python']} platform={row['platform']}")
     print(f"  torch={row['torch']} torch.version.cuda={row['torch_cuda_build']}")
     print(f"  cuda_available={row['cuda_available']} count={row['cuda_device_count']}")
     print(
         f"  mps built={row['mps_built']} available={row['mps_available']} "
-        f"lmwrap_mps_ready={row['mps_ready_lmwrap']}"
+        f"mithril_mps_ready={row['mps_ready_mithril']}"
     )
     vis = row["cuda_visible_devices"]
     if vis:

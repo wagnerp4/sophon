@@ -1,6 +1,6 @@
 <div align="center">
 
-# lmwrap
+# mithril
 
 [![Python](https://img.shields.io/badge/python-3.10+-7f9a97?style=flat-square&logo=python&logoColor=white&labelColor=444444)](./pyproject.toml)
 [![Model](https://img.shields.io/badge/model-Gemma%204%2031B-000000?style=flat-square&logo=huggingface&logoColor=white&labelColor=444444)](https://huggingface.co/google/gemma-4-31B-it)

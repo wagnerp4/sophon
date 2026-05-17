@@ -8,21 +8,21 @@ from pathlib import Path
 from backend.hf.paths import infer_default_quantization, resolve_cli_quantization
 from eval.runner import RunConfig, TaskResult, run_task
 from eval.task_spec import BenchmarkTask, find_task, list_task_ids, load_task
-from utils.env_bootstrap import load_lmwrap_dotenv, lmwrap_project_root
+from utils.env_bootstrap import load_mithril_dotenv, mithril_project_root
 
 
 def _default_data_dir() -> Path:
-    env = os.environ.get("LMWRAP_BENCH_DATA_DIR", "").strip()
+    env = os.environ.get("MITHRIL_BENCH_DATA_DIR", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return (lmwrap_project_root() / "data" / "benchmarks").resolve()
+    return (mithril_project_root() / "data" / "benchmarks").resolve()
 
 
 def _default_out_dir() -> Path:
-    env = os.environ.get("LMWRAP_BENCH_OUT_DIR", "").strip()
+    env = os.environ.get("MITHRIL_BENCH_OUT_DIR", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return (lmwrap_project_root() / "evaluation_runs").resolve()
+    return (mithril_project_root() / "evaluation_runs").resolve()
 
 
 def _parse_task_ids(arg: str | None, data_dir: Path) -> list[str]:
@@ -59,7 +59,7 @@ def _print_summary_table(results: list[TaskResult]) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="lmwrap-benchmark",
+        prog="mithril-benchmark",
         description="Evaluate a local LLM on reasoning benchmarks defined in data/benchmarks.",
     )
     parser.add_argument(
@@ -70,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         default=None,
-        help="Folder with benchmark YAMLs (default: <repo>/data/benchmarks or LMWRAP_BENCH_DATA_DIR).",
+        help="Folder with benchmark YAMLs (default: <repo>/data/benchmarks or MITHRIL_BENCH_DATA_DIR).",
     )
     parser.add_argument(
         "--list",
@@ -81,8 +81,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=("hf", "ollama"),
-        default=os.environ.get("LMWRAP_BENCH_BACKEND", "hf"),
-        help="Inference backend (default: hf; override with LMWRAP_BENCH_BACKEND).",
+        default=os.environ.get("MITHRIL_BENCH_BACKEND", "hf"),
+        help="Inference backend (default: hf; override with MITHRIL_BENCH_BACKEND).",
     )
 
     parser.add_argument(
@@ -112,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--ollama-model",
-        default=os.environ.get("LMWRAP_BENCH_OLLAMA_MODEL"),
+        default=os.environ.get("MITHRIL_BENCH_OLLAMA_MODEL"),
         help="Ollama backend: model name visible to the local daemon.",
     )
     parser.add_argument(
@@ -137,7 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out-dir",
         default=None,
-        help="Run artifact root (default: <repo>/evaluation_runs or LMWRAP_BENCH_OUT_DIR).",
+        help="Run artifact root (default: <repo>/evaluation_runs or MITHRIL_BENCH_OUT_DIR).",
     )
     parser.add_argument(
         "--run-label",
@@ -148,7 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     args = _build_parser().parse_args()
 
     data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir else _default_data_dir()
@@ -168,7 +168,7 @@ def main() -> None:
         task_ids = _parse_task_ids(args.task, data_dir)
         tasks = _load_tasks(task_ids, data_dir)
     except (FileNotFoundError, ValueError) as exc:
-        print(f"lmwrap-benchmark: {exc}", file=sys.stderr)
+        print(f"mithril-benchmark: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
     enable_thinking = args.thinking
@@ -178,7 +178,7 @@ def main() -> None:
     backend = args.backend
     if backend == "ollama" and not args.ollama_model:
         print(
-            "lmwrap-benchmark: --backend ollama requires --ollama-model (or LMWRAP_BENCH_OLLAMA_MODEL).",
+            "mithril-benchmark: --backend ollama requires --ollama-model (or MITHRIL_BENCH_OLLAMA_MODEL).",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -212,7 +212,7 @@ def main() -> None:
         try:
             results.append(run_task(task, config))
         except (FileNotFoundError, ValueError) as exc:
-            print(f"lmwrap-benchmark: task {task.id} skipped: {exc}", file=sys.stderr)
+            print(f"mithril-benchmark: task {task.id} skipped: {exc}", file=sys.stderr)
 
     _print_summary_table(results)
 

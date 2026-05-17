@@ -12,7 +12,7 @@ from huggingface_hub.errors import GatedRepoError
 from huggingface_hub.utils import enable_progress_bars
 from tqdm.auto import tqdm as TqdmAuto
 
-from utils.env_bootstrap import DOTENV_LOAD_PATH, load_lmwrap_dotenv
+from utils.env_bootstrap import DOTENV_LOAD_PATH, load_mithril_dotenv
 from utils.registry import HF_MODEL_PRESETS, preset_summary_lines, resolve_preset_dir
 
 _DEBUG_DEFAULT_PRESET = "llama2_7b_chat"
@@ -49,9 +49,9 @@ def hub_tqdm_bridge_factory(
             kwargs["disable"] = True
             kwargs.setdefault("mininterval", 0.2)
             super().__init__(*args, **kwargs)
-            self._lmwrap_emit()
+            self._mithril_emit()
 
-        def _lmwrap_total_n(self) -> tuple[int, int]:
+        def _mithril_total_n(self) -> tuple[int, int]:
             tot_raw = getattr(self, "total", None)
             if tot_raw is None or (isinstance(tot_raw, float) and math.isnan(tot_raw)):
                 total = 0
@@ -61,8 +61,8 @@ def hub_tqdm_bridge_factory(
             n = max(0, int(n_raw))
             return n, total
 
-        def _lmwrap_emit(self) -> None:
-            n, total = self._lmwrap_total_n()
+        def _mithril_emit(self) -> None:
+            n, total = self._mithril_total_n()
             desc = str(getattr(self, "desc", "") or "").strip()
             unit = str(getattr(self, "unit", "") or "")
             unit_scale = bool(getattr(self, "unit_scale", False))
@@ -93,20 +93,20 @@ def hub_tqdm_bridge_factory(
 
         def update(self, n: int | float | None = 1) -> bool | None:
             r = super().update(n)
-            self._lmwrap_emit()
+            self._mithril_emit()
             return r
 
         def refresh(self, nolock: bool = False, lock_args=None) -> None:
             super().refresh(nolock=nolock, lock_args=lock_args)
-            self._lmwrap_emit()
+            self._mithril_emit()
 
         def set_description(self, desc: str | None = None, refresh: bool = True) -> None:
             super().set_description(desc, refresh=refresh)
-            self._lmwrap_emit()
+            self._mithril_emit()
 
         def close(self) -> None:
             try:
-                self._lmwrap_emit()
+                self._mithril_emit()
             finally:
                 super().close()
 
@@ -143,24 +143,24 @@ def download_preset_snapshot(
         kwargs["tqdm_class"] = tqdm_class
     if verbose:
         print(
-            f"lmwrap: Hub pull preset={preset_key!r} repo_id={repo_id!r}",
+            f"mithril: Hub pull preset={preset_key!r} repo_id={repo_id!r}",
             file=sys.stderr,
             flush=True,
         )
-        print(f"lmwrap: local_dir={local_path}", file=sys.stderr, flush=True)
+        print(f"mithril: local_dir={local_path}", file=sys.stderr, flush=True)
         print(
-            "lmwrap: calling snapshot_download (repo metadata and file list can take minutes on first contact)…",
+            "mithril: calling snapshot_download (repo metadata and file list can take minutes on first contact)…",
             file=sys.stderr,
             flush=True,
         )
     snapshot_download(**kwargs)
     if verbose:
-        print("lmwrap: snapshot_download finished.", file=sys.stderr, flush=True)
+        print("mithril: snapshot_download finished.", file=sys.stderr, flush=True)
     return local_path
 
 
 def main() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     preset_keys = sorted(HF_MODEL_PRESETS.keys())
     parser = argparse.ArgumentParser(
         description="Download Hugging Face model snapshots via preset name or explicit repo id.",
@@ -169,7 +169,7 @@ def main() -> None:
         "--preset",
         choices=preset_keys,
         default="llama2_7b_chat",
-        help="Named Hub target from lmwrap.utils.registry.HF_MODEL_PRESETS (default: %(default)s).",
+        help="Named Hub target from mithril.utils.registry.HF_MODEL_PRESETS (default: %(default)s).",
     )
     parser.add_argument(
         "--repo-id",
@@ -195,7 +195,7 @@ def main() -> None:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Log to stderr, enable Hub progress bars, and print lmwrap status lines.",
+        help="Log to stderr, enable Hub progress bars, and print mithril status lines.",
     )
     args = parser.parse_args()
 
@@ -235,39 +235,39 @@ def main() -> None:
         kwargs["revision"] = revision
     if args.verbose:
         print(
-            f"lmwrap: Hub pull preset={args.preset!r} repo_id={repo_id!r} local_dir={local_path!s}",
+            f"mithril: Hub pull preset={args.preset!r} repo_id={repo_id!r} local_dir={local_path!s}",
             file=sys.stderr,
             flush=True,
         )
         print(
-            "lmwrap: snapshot_download starting (metadata phase may stall with no tqdm yet)…",
+            "mithril: snapshot_download starting (metadata phase may stall with no tqdm yet)…",
             file=sys.stderr,
             flush=True,
         )
     out = snapshot_download(**kwargs)
     if args.verbose:
-        print("lmwrap: snapshot_download finished.", file=sys.stderr, flush=True)
+        print("mithril: snapshot_download finished.", file=sys.stderr, flush=True)
     print(out)
 
 
 def main_debug() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     preset_keys = sorted(HF_MODEL_PRESETS.keys())
-    default_key = os.environ.get("LMWRAP_DEBUG_PRESET", _DEBUG_DEFAULT_PRESET).strip()
+    default_key = os.environ.get("MITHRIL_DEBUG_PRESET", _DEBUG_DEFAULT_PRESET).strip()
     if default_key not in HF_MODEL_PRESETS:
         default_key = _DEBUG_DEFAULT_PRESET
     parser = argparse.ArgumentParser(
         description=(
             "Verbose terminal-only Hub pull for debugging: tqdm + INFO logs on stderr. "
             "Default preset is llama2_7b_chat (same local_dir layout as the registry preset). "
-            "Override with --preset or LMWRAP_DEBUG_PRESET."
+            "Override with --preset or MITHRIL_DEBUG_PRESET."
         ),
     )
     parser.add_argument(
         "--preset",
         choices=preset_keys,
         default=default_key,
-        help="Registry preset (default: %(default)s or LMWRAP_DEBUG_PRESET env).",
+        help="Registry preset (default: %(default)s or MITHRIL_DEBUG_PRESET env).",
     )
     parser.add_argument(
         "--list-presets",
@@ -282,23 +282,23 @@ def main_debug() -> None:
 
     _configure_hub_verbose()
     preset = HF_MODEL_PRESETS[args.preset]
-    print(f"lmwrap-debug: cwd={Path.cwd()}", file=sys.stderr, flush=True)
+    print(f"mithril-debug: cwd={Path.cwd()}", file=sys.stderr, flush=True)
     tok = os.environ.get("HF_TOKEN", "").strip()
     print(
-        f"lmwrap-debug: dotenv={DOTENV_LOAD_PATH!s} HF_TOKEN={'set' if tok else 'unset'}",
+        f"mithril-debug: dotenv={DOTENV_LOAD_PATH!s} HF_TOKEN={'set' if tok else 'unset'}",
         file=sys.stderr,
         flush=True,
     )
-    print(f"lmwrap-debug: preset={args.preset!r} repo_id={preset.repo_id!r}", file=sys.stderr, flush=True)
-    print(f"lmwrap-debug: local_dir={resolve_preset_dir(args.preset)}", file=sys.stderr, flush=True)
+    print(f"mithril-debug: preset={args.preset!r} repo_id={preset.repo_id!r}", file=sys.stderr, flush=True)
+    print(f"mithril-debug: local_dir={resolve_preset_dir(args.preset)}", file=sys.stderr, flush=True)
     if "llama" in args.preset.lower():
         print(
-            "lmwrap-debug: Llama repos are gated. Set HF_TOKEN or run `huggingface-cli login`,",
+            "mithril-debug: Llama repos are gated. Set HF_TOKEN or run `huggingface-cli login`,",
             file=sys.stderr,
             flush=True,
         )
         print(
-            "lmwrap-debug: and open the model card on the Hub to accept the license for your account.",
+            "mithril-debug: and open the model card on the Hub to accept the license for your account.",
             file=sys.stderr,
             flush=True,
         )
@@ -307,7 +307,7 @@ def main_debug() -> None:
     except GatedRepoError as e:
         gated = getattr(e, "repo_id", preset.repo_id)
         print(
-            f"lmwrap-debug: gated repo {gated!r} — access denied for this token/account.",
+            f"mithril-debug: gated repo {gated!r} — access denied for this token/account.",
             file=sys.stderr,
             flush=True,
         )

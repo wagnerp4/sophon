@@ -138,10 +138,10 @@ PREFERRED_DEFAULT_KEY = "llama2_7b_chat"
 
 
 def default_preset_key() -> str:
-    from utils.env_bootstrap import lmwrap_project_root
+    from utils.env_bootstrap import mithril_project_root
 
-    base = lmwrap_project_root()
-    raw = os.environ.get("LMWRAP_HF_PRESET", "").strip()
+    base = mithril_project_root()
+    raw = os.environ.get("MITHRIL_HF_PRESET", "").strip()
     if raw in HF_MODEL_PRESETS:
         return raw
     env_path = os.environ.get("GEMMA4_MODEL", "").strip()

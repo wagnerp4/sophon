@@ -52,7 +52,7 @@ def _device_map_targets_mps(expanded_device_map: dict) -> bool:
     return False
 
 
-def _caching_allocator_warmup_lmwrap(model: object, expanded_device_map: dict, hf_quantizer: object) -> None:
+def _caching_allocator_warmup_mithril(model: object, expanded_device_map: dict, hf_quantizer: object) -> None:
     if _device_map_targets_mps(expanded_device_map):
         return
     _orig_caching_allocator_warmup(model, expanded_device_map, hf_quantizer)
@@ -62,7 +62,7 @@ def install_mps_allocator_warmup_shim() -> None:
     global _mps_warmup_patch_installed
     if _mps_warmup_patch_installed:
         return
-    modeling_utils.caching_allocator_warmup = _caching_allocator_warmup_lmwrap
+    modeling_utils.caching_allocator_warmup = _caching_allocator_warmup_mithril
     _mps_warmup_patch_installed = True
 
 
@@ -200,14 +200,17 @@ def load_processor_and_model(
 ) -> tuple[AutoProcessor, AutoModelForCausalLM]:
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     install_mps_allocator_warmup_shim()
-    from transformers.utils.logging import enable_progress_bar, set_tqdm_hook
+    import transformers.utils.logging as _tr_logging
 
-    enable_progress_bar()
+    enable_pb = getattr(_tr_logging, "enable_progress_bar", None)
+    set_hook = getattr(_tr_logging, "set_tqdm_hook", None)
+    if callable(enable_pb):
+        enable_pb()
     prev_tqdm_hook = None
-    if on_load_progress is not None:
-        prev_tqdm_hook = set_tqdm_hook(_make_ui_tqdm_hook(on_load_progress))
+    if on_load_progress is not None and callable(set_hook):
+        prev_tqdm_hook = set_hook(_make_ui_tqdm_hook(on_load_progress))
     try:
-        print("lmwrap: loading processor (local files)...", file=sys.stderr, flush=True)
+        print("mithril: loading processor (local files)...", file=sys.stderr, flush=True)
         _maybe_load_phase(on_load_progress, "Loading tokenizer and processor (disk I/O)...")
         bnb = bitsandbytes_config(quantization)
         model_kw: dict[str, object] = {
@@ -237,16 +240,22 @@ def load_processor_and_model(
             + "). Quiet stretches are normal until shard tqdm starts.",
         )
         print(
-            "lmwrap: loading weights. progress may pause for minutes on a large shard or 4-bit init.",
+            "mithril: loading weights. progress may pause for minutes on a large shard or 4-bit init.",
             file=sys.stderr,
             flush=True,
         )
-        model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
-        print("lmwrap: model load finished.", file=sys.stderr, flush=True)
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
+        except TypeError as exc:
+            if sys.platform != "win32" or "disable_mmap" not in str(exc):
+                raise
+            model_kw.pop("disable_mmap", None)
+            model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
+        print("mithril: model load finished.", file=sys.stderr, flush=True)
         return processor, model
     finally:
-        if on_load_progress is not None:
-            set_tqdm_hook(prev_tqdm_hook)
+        if on_load_progress is not None and callable(set_hook):
+            set_hook(prev_tqdm_hook)
 
 
 def _build_strip_pattern(extra_specials: list[str] | None = None) -> re.Pattern[str]:

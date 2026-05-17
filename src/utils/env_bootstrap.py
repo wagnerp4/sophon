@@ -6,7 +6,7 @@ from pathlib import Path
 DOTENV_LOAD_PATH: Path | None = None
 
 
-def lmwrap_project_root() -> Path:
+def mithril_project_root() -> Path:
     for anc in Path(__file__).resolve().parents[:10]:
         if (anc / "pyproject.toml").is_file():
             return anc
@@ -14,14 +14,14 @@ def lmwrap_project_root() -> Path:
 
 
 def _dotenv_path() -> Path | None:
-    explicit = os.environ.get("LMWRAP_ENV_FILE", "").strip()
+    explicit = os.environ.get("MITHRIL_ENV_FILE", "").strip()
     if explicit:
         p = Path(explicit).expanduser()
         return p if p.is_file() else None
 
     here = Path.cwd().resolve()
     for d in [here, *here.parents][:14]:
-        for rel in (Path(".env"), Path("lmwrap") / ".env"):
+        for rel in (Path(".env"), Path("mithril") / ".env"):
             cand = (d / rel).resolve()
             if cand.is_file():
                 return cand
@@ -33,11 +33,11 @@ def _dotenv_path() -> Path | None:
     return None
 
 
-def load_lmwrap_dotenv() -> None:
+def load_mithril_dotenv() -> None:
     global DOTENV_LOAD_PATH
 
     DOTENV_LOAD_PATH = None
-    if os.environ.get("LMWRAP_SKIP_DOTENV", "").strip().lower() in ("1", "true", "yes"):
+    if os.environ.get("MITHRIL_SKIP_DOTENV", "").strip().lower() in ("1", "true", "yes"):
         return
     from dotenv import load_dotenv
 

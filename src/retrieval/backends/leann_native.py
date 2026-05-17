@@ -21,7 +21,7 @@ def _load_leann_searcher_cls() -> Any:
         from leann import LeannSearcher as LS
     except ImportError as exc:
         err = ImportError(
-            "LEANN native retriever requires the `leann` distribution (extras: lmwrap[rag-leann]). "
+            "LEANN native retriever requires the `leann` distribution (extras: mithril[rag-leann]). "
             "Install from PyPI or pip install -e from Repos/RAG/LEANN/packages/leann."
         )
         _LeanSearchImportError = err
@@ -31,7 +31,7 @@ def _load_leann_searcher_cls() -> Any:
 
 
 def read_default_top_k_from_env() -> int:
-    top_k_raw = os.environ.get("LMWRAP_LEANN_TOP_K", "5").strip()
+    top_k_raw = os.environ.get("MITHRIL_LEANN_TOP_K", "5").strip()
     try:
         return int(top_k_raw)
     except ValueError:
@@ -39,8 +39,8 @@ def read_default_top_k_from_env() -> int:
 
 
 def lean_native_retriever_from_env() -> RagRetriever | None:
-    """LMWRAP_LEANN_INDEX -> basename path passed to LeannSearcher (expects sibling .meta.json)."""
-    raw = os.environ.get("LMWRAP_LEANN_INDEX", "").strip()
+    """MITHRIL_LEANN_INDEX -> basename path passed to LeannSearcher (expects sibling .meta.json)."""
+    raw = os.environ.get("MITHRIL_LEANN_INDEX", "").strip()
     if not raw:
         return None
     return LeanNativeRetriever(raw, default_top_k=read_default_top_k_from_env())

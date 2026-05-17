@@ -8,7 +8,7 @@ _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent lmwrap.* imports end-to-end.
+# Todo: remove this path bootstrap after the package uses consistent mithril.* imports end-to-end.
 
 import argparse
 import os
@@ -25,11 +25,12 @@ from backend.hf.paths import (
     resolve_cli_quantization,
     resolve_local_model_dir,
 )
-from utils.env_bootstrap import load_lmwrap_dotenv
+from utils.env_bootstrap import load_mithril_dotenv
+from utils.qwen_tts_speaker import play_tts_from_args, register_tts_cli_args
 
 
 def main() -> None:
-    load_lmwrap_dotenv()
+    load_mithril_dotenv()
     parser = argparse.ArgumentParser(description="Text inference from local Hugging Face weights.")
     parser.add_argument(
         "prompt",
@@ -85,6 +86,7 @@ def main() -> None:
         help="Repetition penalty (>=1 discourages repetition).",
     )
     parser.add_argument("--seed", type=int, default=None, help="Generation seed.")
+    register_tts_cli_args(parser)
     args = parser.parse_args()
     enable_thinking = args.thinking
     if enable_thinking is None:
@@ -118,7 +120,9 @@ def main() -> None:
         extra_specials=meta.special_tokens,
         eos_token_ids=meta.eos_token_ids or None,
     )
-    print(parsed_to_display_text(result.parsed))
+    out = parsed_to_display_text(result.parsed)
+    print(out)
+    play_tts_from_args(args, out, lambda m: print(m, file=sys.stderr, flush=True))
 
 
 if __name__ == "__main__":

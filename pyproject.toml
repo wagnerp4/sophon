@@ -3,12 +3,12 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lmwrap"
+name = "mithril"
 version = "0.1.0"
 description = "Utilities around Gemma 4 Hub weights (uv-managed)."
 requires-python = ">=3.10"
 dependencies = [
-    "accelerate>=1.13.0",
+    "accelerate>=1.12.0",
     "bitsandbytes>=0.45.0",
     "huggingface-hub>=0.28.0",
     "pillow>=12.2.0",
@@ -21,32 +21,33 @@ dependencies = [
 ]
 
 [project.scripts]
-lmwrap-infer = "lmwrap.cli.inference:main"
-lmwrap-chat-cli = "lmwrap.cli.chat:main"
-lmwrap-download-hf = "lmwrap.utils.download_hf_model:main"
-lmwrap-download-hf-debug = "lmwrap.utils.download_hf_model:main_debug"
-lmwrap-hf-download = "lmwrap.utils.hf_download_cli:main"
-lmwrap-system-check = "lmwrap.utils.system_check:main"
-lmwrap-benchmark = "lmwrap.eval.benchmark:main"
+mithril-infer = "mithril.cli.inference:main"
+mithril-chat-cli = "mithril.cli.chat:main"
+mithril-download-hf = "mithril.utils.download_hf_model:main"
+mithril-download-hf-debug = "mithril.utils.download_hf_model:main_debug"
+mithril-hf-download = "mithril.utils.hf_download_cli:main"
+mithril-system-check = "mithril.utils.system_check:main"
+mithril-benchmark = "mithril.eval.benchmark:main"
 
 [project.optional-dependencies]
 rag = []
-rag-leann = ["leann>=0.3.8"]
+rag-leann = ["leann>=0.3.7"]
+tts = ["qwen-tts", "soundfile"]
 
 [tool.setuptools]
-package-dir = {"lmwrap" = "src"}
+package-dir = {"mithril" = "src"}
 packages = [
-    "lmwrap",
-    "lmwrap.backend",
-    "lmwrap.backend.hf",
-    "lmwrap.backend.ollama",
-    "lmwrap.cli",
-    "lmwrap.context",
-    "lmwrap.eval",
-    "lmwrap.memory",
-    "lmwrap.retrieval",
-    "lmwrap.retrieval.backends",
-    "lmwrap.utils",
+    "mithril",
+    "mithril.backend",
+    "mithril.backend.hf",
+    "mithril.backend.ollama",
+    "mithril.cli",
+    "mithril.context",
+    "mithril.eval",
+    "mithril.memory",
+    "mithril.retrieval",
+    "mithril.retrieval.backends",
+    "mithril.utils",
 ]
 
 [[tool.uv.index]]

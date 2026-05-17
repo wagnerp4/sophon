@@ -19,7 +19,7 @@ def load_rag_retriever(
     entrypoint: str | None = None,
     native_index_path: str | None = None,
 ) -> RagRetriever:
-    """Select a retrieval backend. Use entrypoint= for dotted module paths and native_index_path= or LMWRAP_LEANN_INDEX for LEANN."""
+    """Select a retrieval backend. Use entrypoint= for dotted module paths and native_index_path= or MITHRIL_LEANN_INDEX for LEANN."""
     if entrypoint:
         return load_retriever_from_entrypoint(entrypoint.strip())
     if backend_id == "noop":

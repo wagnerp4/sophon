@@ -207,7 +207,7 @@ def run_task(task: BenchmarkTask, config: RunConfig) -> TaskResult:
         "seed": config.seed,
     }
     _emit(
-        f"lmwrap-benchmark: task={task.id} backend={config.backend} limit={effective_limit} "
+        f"mithril-benchmark: task={task.id} backend={config.backend} limit={effective_limit} "
         f"out={out_dir}"
     )
 
@@ -287,7 +287,7 @@ def run_task(task: BenchmarkTask, config: RunConfig) -> TaskResult:
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     _emit(
-        f"lmwrap-benchmark: task={task.id} done in {elapsed_s:.1f}s "
+        f"mithril-benchmark: task={task.id} done in {elapsed_s:.1f}s "
         f"accuracy={accuracy:.3f} ({correct}/{total}) -> {summary_path}"
     )
 
