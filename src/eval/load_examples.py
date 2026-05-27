@@ -129,6 +129,10 @@ def iter_examples(
         return _iter_jsonl_examples(task, limit)
     if task.source.kind == "mmlu_csv":
         return _iter_mmlu_examples(task, split, limit)
+    if task.source.kind == "hellaswag":
+        from eval.datasets.hellaswag.pipeline import iter_hellaswag_examples as iter_hs
+
+        return iter_hs(task, split=split, limit=limit)
     raise ValueError(f"unsupported source kind: {task.source.kind!r}")
 
 

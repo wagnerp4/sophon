@@ -45,11 +45,13 @@ class RunConfig:
     split: str | None = None
     limit: int | None = None
     out_dir: Path = field(default_factory=lambda: Path("evaluation_runs"))
+    run_id: str | None = None
     run_label: str | None = None
 
 
 @dataclass
 class TaskResult:
+    run_id: str
     task_id: str
     total: int
     correct: int
@@ -175,17 +177,17 @@ def _prepare_ollama(config: RunConfig) -> None:
 
 
 def run_task(task: BenchmarkTask, config: RunConfig) -> TaskResult:
-    label = config.run_label or _now_label()
-    out_dir = (config.out_dir / task.id / label).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    predictions_path = out_dir / "predictions.jsonl"
-    summary_path = out_dir / "summary.json"
+    rid = config.run_id or _now_label()
+    task_out_dir = (config.out_dir / rid / task.id).resolve()
+    task_out_dir.mkdir(parents=True, exist_ok=True)
+    predictions_path = task_out_dir / "predictions.jsonl"
+    summary_path = task_out_dir / "summary.json"
 
     effective_limit = config.limit if config.limit is not None else task.defaults.max_examples
 
     cfg_record = _serialize_config(task, config)
     cfg_record["effective_limit"] = effective_limit
-    cfg_record["run_label"] = label
+    cfg_record["run_id"] = rid
 
     meta: ModelMeta | None = None
     processor: object | None = None
@@ -207,8 +209,8 @@ def run_task(task: BenchmarkTask, config: RunConfig) -> TaskResult:
         "seed": config.seed,
     }
     _emit(
-        f"mithril-benchmark: task={task.id} backend={config.backend} limit={effective_limit} "
-        f"out={out_dir}"
+        f"mithril-benchmark: task={task.id} run_id={rid} backend={config.backend} limit={effective_limit} "
+        f"out={task_out_dir}"
     )
 
     correct = 0
@@ -292,6 +294,7 @@ def run_task(task: BenchmarkTask, config: RunConfig) -> TaskResult:
     )
 
     return TaskResult(
+        run_id=rid,
         task_id=task.id,
         total=total,
         correct=correct,

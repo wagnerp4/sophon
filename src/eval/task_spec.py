@@ -13,6 +13,7 @@ class SourceSpec:
     path: Path | None = None
     root: Path | None = None
     splits: dict[str, str] = field(default_factory=dict)
+    dataset_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -95,14 +96,24 @@ def _resolve_rel(spec_path: Path, value: str) -> Path:
 
 def _parse_source(raw: dict[str, Any], spec_path: Path) -> SourceSpec:
     kind = _require_str(raw.get("kind"), "source.kind")
+    opts_raw = raw.get("options") or {}
+    opts_dict = _require_dict(opts_raw, "source.options")
+    dataset_options = {str(k): v for k, v in opts_dict.items()}
     if kind == "jsonl":
         path = _resolve_rel(spec_path, _require_str(raw.get("path"), "source.path"))
-        return SourceSpec(kind=kind, path=path)
+        return SourceSpec(kind=kind, path=path, dataset_options=dataset_options)
     if kind == "mmlu_csv":
         root = _resolve_rel(spec_path, _require_str(raw.get("root"), "source.root"))
         splits_raw = raw.get("splits") or {"dev": "dev", "test": "test"}
         splits = {str(k): str(v) for k, v in _require_dict(splits_raw, "source.splits").items()}
-        return SourceSpec(kind=kind, root=root, splits=splits)
+        return SourceSpec(kind=kind, root=root, splits=splits, dataset_options=dataset_options)
+    if kind == "hellaswag":
+        root = _resolve_rel(spec_path, _require_str(raw.get("root"), "source.root"))
+        splits_raw = raw.get("splits") or {"val": "hellaswag_val.jsonl"}
+        splits = {str(k): str(v) for k, v in _require_dict(splits_raw, "source.splits").items()}
+        if not splits:
+            raise ValueError("source.splits for hellaswag must be non-empty")
+        return SourceSpec(kind=kind, root=root, splits=splits, dataset_options=dataset_options)
     raise ValueError(f"unsupported source.kind: {kind!r}")
 
 

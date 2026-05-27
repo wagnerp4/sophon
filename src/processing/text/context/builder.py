@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from retrieval.types import RetrievalResult
+from ..retrieval.types import RetrievalResult
 
 from .types import ContextBuildResult, Message
 

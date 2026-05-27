@@ -134,11 +134,53 @@ def resolve_preset_dir(preset_key: str, cwd: Path | None = None) -> Path:
     return (base / preset.default_local_dir).expanduser().resolve()
 
 
+def preset_has_weights(preset_key: str, cwd: Path | None = None) -> bool:
+    return (resolve_preset_dir(preset_key, cwd) / "config.json").is_file()
+
+
+def local_only_model_dirs(cwd: Path | None = None) -> list[Path]:
+    from utils.device.env_bootstrap import mithril_project_root
+
+    base = cwd if cwd is not None else mithril_project_root()
+    models_root = base / "models"
+    if not models_root.is_dir():
+        return []
+    preset_paths = {resolve_preset_dir(key, base).resolve() for key in HF_MODEL_PRESETS}
+    out: list[Path] = []
+    for sub in sorted(models_root.iterdir(), key=lambda item: item.name.lower()):
+        if not sub.is_dir():
+            continue
+        resolved = sub.resolve()
+        if (resolved / "config.json").is_file() and resolved not in preset_paths:
+            out.append(resolved)
+    return out
+
+
+def match_preset_key(token: str) -> str | None:
+    raw = token.strip()
+    if not raw:
+        return None
+    if raw in HF_MODEL_PRESETS:
+        return raw
+    lower = raw.lower()
+    exact_ci = [key for key in HF_MODEL_PRESETS if key.lower() == lower]
+    if len(exact_ci) == 1:
+        return exact_ci[0]
+    prefix = [key for key in HF_MODEL_PRESETS if key.lower().startswith(lower)]
+    if len(prefix) == 1:
+        return prefix[0]
+    if len(prefix) > 1:
+        sample = ", ".join(prefix[:8])
+        more = f" (+{len(prefix) - 8} more)" if len(prefix) > 8 else ""
+        raise ValueError(f"ambiguous preset {raw!r}: {sample}{more}")
+    return None
+
+
 PREFERRED_DEFAULT_KEY = "llama2_7b_chat"
 
 
 def default_preset_key() -> str:
-    from utils.env_bootstrap import mithril_project_root
+    from utils.device.env_bootstrap import mithril_project_root
 
     base = mithril_project_root()
     raw = os.environ.get("MITHRIL_HF_PRESET", "").strip()

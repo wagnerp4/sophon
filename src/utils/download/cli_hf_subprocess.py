@@ -6,8 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from utils.env_bootstrap import load_mithril_dotenv, mithril_project_root
-from utils.registry import HF_MODEL_PRESETS, default_preset_key, resolve_preset_dir
+from backend.hf.registry import HF_MODEL_PRESETS, default_preset_key, resolve_preset_dir
+from utils.device.env_bootstrap import load_mithril_dotenv, mithril_project_root
 
 
 def build_hf_download_argv(
@@ -70,7 +70,7 @@ def main() -> None:
         "--preset",
         choices=preset_keys,
         default=None,
-        help="Preset from mithril registry. Omit repo_id alone for models/<slug>; omit both for default_preset_key().",
+        help="Preset from mithril HF registry (backend.hf.registry). Omit repo_id alone for models/<slug>; omit both for default_preset_key().",
     )
     parser.add_argument(
         "--local-dir",
@@ -123,3 +123,7 @@ def main() -> None:
     cmd = build_hf_download_argv(repo_id, dest, revision=revision)
     print("mithril-hf-download:", " ".join(_mask_argv_for_print(cmd)), file=sys.stderr, flush=True)
     raise SystemExit(subprocess.call(cmd, cwd=str(root)))
+
+
+if __name__ == "__main__":
+    main()

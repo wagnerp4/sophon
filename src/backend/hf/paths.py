@@ -57,8 +57,15 @@ def infer_default_quantization() -> str:
     try:
         import torch
 
-        if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        mps_backend = getattr(torch.backends, "mps", None)
+        if (
+            mps_backend is not None
+            and mps_backend.is_available()
+            and mps_backend.is_built()
+        ):
             return "none"
+        if torch.cuda.is_available():
+            return "4bit"
     except Exception:
         pass
-    return "8bit"
+    return "none"

@@ -24,7 +24,7 @@ def load_backend(backend_id: BackendId):
 
 
 def hf_model_preset_keys() -> list[str]:
-    from utils.registry import preset_keys_sorted
+    from backend.hf.registry import preset_keys_sorted
 
     return preset_keys_sorted()
 

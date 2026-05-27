@@ -1,0 +1,40 @@
+id: hellaswag
+description: "HellaSwag commonsense sentence completion (4-choice MCQ, Zellers et al. 2019)."
+
+source:
+  kind: hellaswag
+  root: "../hellaswag/data"
+  splits:
+    val: hellaswag_val.jsonl
+    train: hellaswag_train.jsonl
+    test: hellaswag_test.jsonl
+  options:
+    ctx_mode: raw
+    lm_eval_normalize: false
+    split_types: null
+    shuffle_choices_seed: null
+
+prompt:
+  type: multiple_choice
+  system: "You are a careful reasoner. Pick the option that most plausibly continues the passage."
+  template: |
+    Activity: {activity_label}
+    Context: {ctx}
+
+    Continuations:
+    {choices_block}
+
+    Reply with a single letter (A, B, C, or D).
+  field_map:
+    activity_label: activity_label
+    ctx: ctx
+    choices: endings
+    label: label
+
+scorer:
+  name: multiple_choice_letter
+  num_choices: 4
+
+defaults:
+  max_new_tokens: 64
+  max_examples: null

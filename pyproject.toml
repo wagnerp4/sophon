@@ -10,29 +10,33 @@ requires-python = ">=3.10"
 dependencies = [
     "accelerate>=1.12.0",
     "bitsandbytes>=0.45.0",
+    "click>=8.0",
     "huggingface-hub>=0.28.0",
     "pillow>=12.2.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
-    "transformers>=4.50.0",
+    "transformers>=5.8.0",
     "tqdm>=4.64.0",
 ]
 
 [project.scripts]
+mithril-cli = "mithril.cli.terminal:main"
 mithril-infer = "mithril.cli.inference:main"
 mithril-chat-cli = "mithril.cli.chat:main"
-mithril-download-hf = "mithril.utils.download_hf_model:main"
-mithril-download-hf-debug = "mithril.utils.download_hf_model:main_debug"
-mithril-hf-download = "mithril.utils.hf_download_cli:main"
-mithril-system-check = "mithril.utils.system_check:main"
+mithril-chat-tui = "mithril.cli.textual_app:main"
+mithril-download-hf = "mithril.utils.download.cli_snapshot:main"
+mithril-download-hf-debug = "mithril.utils.download.cli_snapshot:main_debug"
+mithril-hf-download = "mithril.utils.download.cli_hf_subprocess:main"
+mithril-system-check = "mithril.utils.device.system_check:main"
 mithril-benchmark = "mithril.eval.benchmark:main"
 
 [project.optional-dependencies]
 rag = []
 rag-leann = ["leann>=0.3.7"]
 tts = ["qwen-tts", "soundfile"]
+tui = ["textual>=0.80.0"]
 
 [tool.setuptools]
 package-dir = {"mithril" = "src"}
@@ -42,12 +46,22 @@ packages = [
     "mithril.backend.hf",
     "mithril.backend.ollama",
     "mithril.cli",
-    "mithril.context",
+    "mithril.cli.tui",
     "mithril.eval",
-    "mithril.memory",
-    "mithril.retrieval",
-    "mithril.retrieval.backends",
+    "mithril.eval.datasets",
+    "mithril.eval.datasets.hellaswag",
+    "mithril.processing",
+    "mithril.processing.audio",
+    "mithril.processing.audio.speech",
+    "mithril.processing.audio.speech.backends",
+    "mithril.processing.text",
+    "mithril.processing.text.context",
+    "mithril.processing.text.memory",
+    "mithril.processing.text.retrieval",
+    "mithril.processing.text.retrieval.backends",
     "mithril.utils",
+    "mithril.utils.device",
+    "mithril.utils.download",
 ]
 
 [[tool.uv.index]]
@@ -61,4 +75,9 @@ torch = [
 ]
 torchvision = [
     { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[tool.uv]
+override-dependencies = [
+    "transformers>=5.8.0",
 ]

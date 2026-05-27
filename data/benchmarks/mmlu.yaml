@@ -1,0 +1,34 @@
+id: mmlu
+description: "MMLU multi-subject MCQ (Hendrycks et al. 2021). Requires the upstream CSV dump under data/test/data/{dev,test}."
+
+source:
+  kind: mmlu_csv
+  root: "../test/data"
+  splits:
+    dev: dev
+    test: test
+
+prompt:
+  type: multiple_choice
+  system: ""
+  template: |
+    The following is a multiple choice question (with answers) about {subject}.
+
+    {question}
+    A. {a}
+    B. {b}
+    C. {c}
+    D. {d}
+    Answer:
+  field_map:
+    question: question
+    label: label
+
+scorer:
+  name: multiple_choice_letter
+  num_choices: 4
+
+defaults:
+  max_new_tokens: 16
+  max_examples: 100
+  fewshot: 0

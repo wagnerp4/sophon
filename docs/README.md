@@ -29,20 +29,23 @@ Optional: if `.env.example` ships in-tree, copy to `.env` and set `HF_TOKEN`. Ov
 | Path | Purpose |
 | --- | --- |
 | `src/` | Package tree; setuptools `package-dir` maps **`mithril` -> `src`**. |
-| `src/backend/` | Hugging Face path (`hf/backend`, `hf/paths`, `hf/const`) and Ollama client `ollama/backend`. |
-| `src/cli/` | `inference`, `chat`. |
-| `src/context/` | Assemble transient message lists for the model call. |
+| `src/backend/` | HF runtime (`hf/backend`, `hf/paths`, `hf/const`, `hf/registry`) and Ollama (`ollama/backend`). |
+| `src/cli/` | `infer`/`chat` backends (`inference.py`, `chat.py`), Click front-end (`terminal.py`), shared parsing (`terminal_setup.py`). |
 | `src/eval/` | `mithril-benchmark` runner (`runner`, `scorers`, `task_spec`). |
-| `src/memory/` | SQLite-backed chat memory (`SqliteMemoryStore`). |
-| `src/retrieval/` | Retrieval protocols and backends (noop, LEANN, callable). |
-| `src/utils/` | Hub download CLIs, `system_check`, preset `registry`, `env_bootstrap`. |
+| `src/processing/audio/` | Audio I/O pipelines (`speech/` TTS backends). |
+| `src/processing/text/context/` | Assemble transient message lists for the model call. |
+| `src/processing/text/memory/` | SQLite-backed chat memory (`SqliteMemoryStore`). |
+| `src/processing/text/retrieval/` | Retrieval protocols and backends (noop, LEANN, callable). |
+| `src/utils/` | Hub downloads (`utils/download/`). |
+| `src/utils/device/` | `.env` / project-root discovery (`env_bootstrap`), `mithril-system-check` (`system_check`). |
 | `data/benchmarks/` | YAML task manifests (`data/benchmarks/README.md`). |
+| `docs/integrations/` | External host notes (for example Toad). |
 
-Downloaded checkpoints usually live under `models/` (gitignored).
+Downloaded checkpoints usually live under `models/` (gitignored). Runtime chat logs and bundled UI assets live under `data/chat_logs/` and `data/assets/`.
 
-Console entry points live in [`pyproject.toml`](../pyproject.toml): **`mithril-infer`**, **`mithril-chat-cli`**, **`mithril-system-check`**, **`mithril-download-hf`**, **`mithril-hf-download`**, **`mithril-download-hf-debug`**, **`mithril-benchmark`**.
+Console entry points live in [`pyproject.toml`](../pyproject.toml): **`mithril-cli`**, **`mithril-infer`**, **`mithril-chat-cli`**, **`mithril-system-check`**, **`mithril-download-hf`**, **`mithril-hf-download`**, **`mithril-download-hf-debug`**, **`mithril-benchmark`**.
 
-Runtimes install **`mithril.retrieval`**, **`mithril.memory`**, **`mithril.context`**, … as subpackages. For development without editable install, point `PYTHONPATH` at `src/` so shorthand imports (`import retrieval`, `import cli.chat`) mirror the path bootstrap bundled with the scripts.
+Runtimes install **`mithril.processing.text.retrieval`**, **`mithril.processing.text.memory`**, **`mithril.processing.text.context`**, … as subpackages. For development without editable install, point `PYTHONPATH` at `src/` so shorthand imports (`import processing.text.retrieval`, `import cli.chat`) mirror the path bootstrap bundled with the scripts.
 
 Optional retrieval extras:
 
@@ -70,10 +73,25 @@ $env:PYTHONPATH = "C:\Software\Python\NLP\mithril\src"
 - Eval: `MITHRIL_BENCH_DATA_DIR`, `MITHRIL_BENCH_OUT_DIR`, `MITHRIL_BENCH_BACKEND`,
   `MITHRIL_BENCH_OLLAMA_MODEL`, `OLLAMA_HOST`.
 
+## Click CLI (`mithril-cli`)
+
+The interactive and one-shot helpers use [Click](https://click.palletsprojects.com/) instead of **`argparse`**.
+
+- **`mithril-cli`** is the umbrella entry point: choose **`infer`** or **`chat`** as the first positional argument.
+- **`mithril-infer`** and **`mithril-chat-cli`** stay as compatibility shims mapping to **`infer`** and **`chat`** with the legacy executable names preserved in **`--help`**.
+
+```powershell
+mithril-cli infer "Hello" --model .\models\my-model
+mithril-cli chat --preset llama2_7b_chat
+python -m mithril.cli infer --help
+```
+
+
 ## CLI overview
 
 | Command | Purpose |
 | --- | --- |
+| `mithril-cli` | Click umbrella for `infer` and `chat`. |
 | `mithril-chat-cli` | Interactive REPL with optional RAG + memory. |
 | `mithril-infer` | One-shot prompt -> reply. |
 | `mithril-hf-download` | Wrap official `huggingface-cli` download by repo or preset. |
@@ -84,12 +102,14 @@ $env:PYTHONPATH = "C:\Software\Python\NLP\mithril\src"
 
 ## `mithril-chat-cli`
 
+Equivalent form: **`mithril-cli chat ...`**.
+
 Interactive chat backed by a local HF model. Adds retrieval and SQLite memory when
 the matching flags or env vars are set.
 
 ```powershell
 $env:PYTHONPATH = "C:\Software\Python\NLP\mithril\src"
-mithril-chat-cli --memory-db .\chat_logs\memory.sqlite --memory-session demo --rag leann --rag-index C:\path\to\my_index
+mithril-chat-cli --memory-db .\data\chat_logs\memory.sqlite --memory-session demo --rag leann --rag-index C:\path\to\my_index
 ```
 
 ### Model selection
@@ -144,10 +164,12 @@ Triple-quoted input (`"""multi-line"""`) is gathered until the closing fence.
 
 ## `mithril-infer`
 
-One-shot prompt -> reply. Same model/quantization/sampling flags as the chat CLI.
+Equivalent form: **`mithril-cli infer PROMPT`** (also **`python -m mithril.cli infer PROMPT`**).
+
+One-shot prompt -> reply. Same model/quantization/sampling flags as the chat CLI, except **`mithril-chat-cli`** alone accepts **`--preset`**.
 
 ```powershell
-mithril-infer "Write a haiku about mithril." --preset llama2_7b_chat --quantization 4bit
+mithril-infer "Write a haiku about mithril." --model .\models\meta-llama-Llama-2-7b-chat-hf --quantization 4bit
 ```
 
 Use `--system`, `--temperature`, `--top-p`, `--top-k`, `--repetition-penalty`,
@@ -167,7 +189,7 @@ Checkpoint directory resolution (`mithril-infer`, benchmarks, chat model args):
 | `none` | Full weights. On Apple Silicon with MPS, the HF path prefers MPS placement when available; on CUDA hosts, `device_map="auto"` is typical. |
 | `4bit`, `8bit`, `lightweight` | Bitsandbytes path; **CUDA** in typical setups on this project. Avoid on Apple Silicon. |
 
-Default when **`GEMMA4_QUANTIZATION`** is unset: **`none`** if PyTorch reports MPS usable, else **`4bit`** oriented toward NVIDIA workflows. **`PYTORCH_ENABLE_MPS_FALLBACK`** defaults to enable mixed-kernel fallback on Metal.
+Default when **`GEMMA4_QUANTIZATION`** is unset: **`none`** if MPS is usable; **`4bit`** when **`torch.cuda.is_available()`**; otherwise **`none`** (CPU-only PyTorch). **`PYTORCH_ENABLE_MPS_FALLBACK`** defaults to enable mixed-kernel fallback on Metal.
 
 Thinking mode CLI: **`--thinking` / `--no-thinking`**. If omitted, **`GEMMA4_THINKING`** (`1` / `true` / `yes`) enables it.
 
@@ -237,21 +259,22 @@ Args (selection): `--task ID|all`, `--data-dir`, `--list`,
 `--backend {hf,ollama}`, `--model`, `--quantization`, `--qbit`, `--thinking`,
 `--ollama-model`, `--ollama-host`, `--limit`, `--split`, `--max-new-tokens`,
 `--temperature`, `--top-p`, `--top-k`, `--repetition-penalty`, `--seed`,
-`--out-dir`, `--run-label`.
+`--out-dir`, `--run-id`, `--run-label`.
 
-Run artifacts (default `<repo>/evaluation_runs/` or `MITHRIL_BENCH_OUT_DIR`):
+Run artifacts (default `<repo>/data/exps/` or `MITHRIL_BENCH_OUT_DIR`), layout `<out>/<run_id>/<task>/`:
 
-- **`predictions.jsonl`**: one JSON object per example (raw response text, routed answer extraction, labels, timings).
-- **`summary.json`**: aggregate accuracy and timing plus serialized `RunConfig`.
+- **`experiment_summary.json`** (under `<run_id>/`): fingerprint digest plus pointers to each task `summary.json` / `predictions.jsonl`.
+- **`predictions.jsonl`** (per task): one JSON object per example (raw response text, routed answer extraction, labels, timings).
+- **`summary.json`** (per task): aggregate accuracy and timing plus serialized `RunConfig`.
 
-The HF backend shares quantization, thinking switches, checkpoint resolution env vars (`GEMMA4_MODEL`, `GEMMA4_LOCAL_DIR`, `GEMMA4_QBIT`, `GEMMA4_THINKING`, …) with `mithril-infer`. `MITHRIL_BENCH_DATA_DIR` and `MITHRIL_BENCH_OUT_DIR` override folders when flags are omitted.
+Auto **`run_id`** is UTC timestamp (second + microsecond) + backend + slug(model dir name + path digest on HF, or Ollama model name) + quantization + thinking flag + 12-char SHA256 digest of CLI knobs (temperature, seeds, split, limit, …). Override with **`--run-id`**, append a note with **`--run-label`** (`__suffix`).
 
 ## Retrieval module
 
-`mithril.retrieval` exposes the protocols, factory, and bundled backends.
+`mithril.processing.text.retrieval` exposes the protocols, factory, and bundled backends.
 
 ```python
-from mithril.retrieval import load_rag_retriever, RetrievalQuery
+from mithril.processing.text.retrieval import load_rag_retriever, RetrievalQuery
 
 retriever = load_rag_retriever("leann", native_index_path=r"C:\path\to\my_index")
 hits = retriever.retrieve(RetrievalQuery("what is X?", params={"top_k": 8}))
@@ -272,13 +295,13 @@ Indexing (building corpora) is intentionally out of scope. Use LEANN's own tools
 
 ## Memory module
 
-`mithril.memory` provides `SqliteMemoryStore` with schema v1
+`mithril.processing.text.memory` provides `SqliteMemoryStore` with schema v1
 (`sessions`, `messages`, `schema_meta`).
 
 ```python
-from mithril.memory import SqliteMemoryStore, MemoryScope, open_memory_store
+from mithril.processing.text.memory import SqliteMemoryStore, MemoryScope, open_memory_store
 
-store = open_memory_store(r".\chat_logs\memory.sqlite")  # honors MITHRIL_MEMORY_DB
+store = open_memory_store(r".\data\chat_logs\memory.sqlite")  # honors MITHRIL_MEMORY_DB
 scope = MemoryScope(session_id="demo", user_id="philipp")
 store.append_turn(scope, "user", "hello")
 store.append_turn(scope, "assistant", "hi there", meta={"backend": "hf"})
@@ -291,12 +314,12 @@ Persistence is opt-in. Without a path, the chat loop runs ephemeral.
 
 ## Context module
 
-`mithril.context.build_messages_for_model` composes the message list sent to the
+`mithril.processing.text.context.build_messages_for_model` composes the message list sent to the
 model. It does not mutate the canonical transcript; the chat CLI keeps
 `state.messages` clean and assembles a transient list per turn (design fork A).
 
 ```python
-from mithril.context import build_messages_for_model
+from mithril.processing.text.context import build_messages_for_model
 
 built = build_messages_for_model(
     base_messages=state.messages,
@@ -329,7 +352,7 @@ $env:HF_TOKEN = "<token>"
 mithril-chat-cli `
   --preset llama2_7b_chat `
   --quantization 4bit `
-  --memory-db .\chat_logs\memory.sqlite `
+  --memory-db .\data\chat_logs\memory.sqlite `
   --memory-session demo `
   --rag leann `
   --rag-index .\indexes\my_corpus
@@ -338,7 +361,7 @@ mithril-chat-cli `
 Reuse the session later:
 
 ```powershell
-mithril-chat-cli --memory-db .\chat_logs\memory.sqlite --memory-session demo
+mithril-chat-cli --memory-db .\data\chat_logs\memory.sqlite --memory-session demo
 ```
 
 Inspect what is loaded inside the chat:

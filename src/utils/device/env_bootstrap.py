@@ -13,6 +13,20 @@ def mithril_project_root() -> Path:
     return Path.cwd().resolve()
 
 
+def mithril_data_dir() -> Path:
+    return mithril_project_root() / "data"
+
+
+def mithril_chat_logs_dir() -> Path:
+    target = mithril_data_dir() / "chat_logs"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def mithril_assets_dir() -> Path:
+    return mithril_data_dir() / "assets"
+
+
 def _dotenv_path() -> Path | None:
     explicit = os.environ.get("MITHRIL_ENV_FILE", "").strip()
     if explicit:

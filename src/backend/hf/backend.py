@@ -192,6 +192,16 @@ def _maybe_load_phase(
     cb(0, 0, description)
 
 
+def _log_load(
+    cb: Callable[[int, int, str], None] | None,
+    description: str,
+) -> None:
+    if cb is not None:
+        cb(0, 0, description)
+        return
+    print(f"mithril: {description}", file=sys.stderr, flush=True)
+
+
 def load_processor_and_model(
     model_path: str,
     quantization: str,
@@ -210,7 +220,7 @@ def load_processor_and_model(
     if on_load_progress is not None and callable(set_hook):
         prev_tqdm_hook = set_hook(_make_ui_tqdm_hook(on_load_progress))
     try:
-        print("mithril: loading processor (local files)...", file=sys.stderr, flush=True)
+        _log_load(on_load_progress, "loading processor (local files)...")
         _maybe_load_phase(on_load_progress, "Loading tokenizer and processor (disk I/O)...")
         bnb = bitsandbytes_config(quantization)
         model_kw: dict[str, object] = {
@@ -221,8 +231,10 @@ def load_processor_and_model(
         if bnb is not None:
             if not torch.cuda.is_available():
                 raise ValueError(
-                    "4bit and 8bit loading relies on CUDA bitsandbytes. "
-                    "On Apple Silicon use quantization none so the checkpoint loads on MPS."
+                    "4bit and 8bit loading rely on CUDA and bitsandbytes "
+                    "(torch.cuda.is_available() must be True). "
+                    "Use --quantization none or --qbit 0 for CPU-only or non-CUDA PyTorch. "
+                    "For GPUs, install a CUDA build from https://pytorch.org/get-started/locally/"
                 )
             model_kw["device_map"] = "auto"
             model_kw["quantization_config"] = bnb
@@ -239,10 +251,9 @@ def load_processor_and_model(
             + str(quantization)
             + "). Quiet stretches are normal until shard tqdm starts.",
         )
-        print(
-            "mithril: loading weights. progress may pause for minutes on a large shard or 4-bit init.",
-            file=sys.stderr,
-            flush=True,
+        _log_load(
+            on_load_progress,
+            "loading weights. progress may pause for minutes on a large shard or 4-bit init.",
         )
         try:
             model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
@@ -251,7 +262,7 @@ def load_processor_and_model(
                 raise
             model_kw.pop("disable_mmap", None)
             model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
-        print("mithril: model load finished.", file=sys.stderr, flush=True)
+        _log_load(on_load_progress, "model load finished.")
         return processor, model
     finally:
         if on_load_progress is not None and callable(set_hook):

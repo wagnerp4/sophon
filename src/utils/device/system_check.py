@@ -3,12 +3,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_src_root = Path(__file__).resolve().parent.parent
+_src_root = Path(__file__).resolve().parent.parent.parent
 _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent mithril.* imports end-to-end.
 
 import argparse
 import ctypes
@@ -21,7 +20,7 @@ from typing import Any
 
 from backend.hf.backend import mps_ready
 from backend.hf.paths import infer_default_quantization, resolve_local_model_dir
-from utils.env_bootstrap import load_mithril_dotenv
+from utils.device.env_bootstrap import load_mithril_dotenv
 
 
 def _fmt_bytes(n: int) -> str:
@@ -210,6 +209,69 @@ def _choose_recommended_device() -> str:
     return "cpu"
 
 
+def collect_system_snapshot(
+    *,
+    device: str = "all",
+    cuda_device: int = 0,
+    model: str | None = None,
+) -> dict[str, Any]:
+    import torch
+
+    host = _host_memory_snapshot()
+    recommended = _choose_recommended_device()
+    row: dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "torch": torch.__version__,
+        "torch_cuda_build": torch.version.cuda,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+        "mps_built": bool(torch.backends.mps.is_built()),
+        "mps_available": bool(torch.backends.mps.is_available()),
+        "mps_ready_mithril": bool(mps_ready()),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+        "gemma4_quantization_default": infer_default_quantization(),
+        "host_memory": host,
+        "bitsandbytes": _bitsandbytes_note() if torch.cuda.is_available() else "skipped_no_cuda",
+        "devices": [],
+        "recommended_device": recommended,
+    }
+
+    if model:
+        mp = resolve_local_model_dir(model)
+        row["model_dir"] = str(mp)
+        row["model_config_present"] = (mp / "config.json").is_file()
+        row["model_weight_index_total_bytes"] = _model_weight_bytes_hint(mp)
+
+    dev_rows: list[dict[str, Any]] = []
+    mode = device
+    if mode == "auto":
+        if recommended.startswith("cuda") and torch.cuda.is_available():
+            cidx = cuda_device
+            if ":" in recommended:
+                try:
+                    cidx = int(recommended.split(":", 1)[1])
+                except ValueError:
+                    cidx = cuda_device
+            if 0 <= cidx < torch.cuda.device_count():
+                dev_rows.append(_report_cuda_line(cidx))
+        elif recommended == "mps" and mps_ready():
+            dev_rows.append({"kind": "mps", "index": 0, "name": "Apple MPS", "detail": "no_free_mem_api"})
+        else:
+            dev_rows.append({"kind": "cpu", "index": 0, "name": platform.processor() or "cpu"})
+    else:
+        if mode in ("all", "cuda") and torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                dev_rows.append(_report_cuda_line(i))
+        if mode in ("all", "mps") and mps_ready():
+            dev_rows.append({"kind": "mps", "index": 0, "name": "Apple MPS", "detail": "no_free_mem_api"})
+        if mode in ("all", "cpu") or (mode == "all" and not dev_rows):
+            dev_rows.append({"kind": "cpu", "index": 0, "name": platform.processor() or "cpu"})
+
+    row["devices"] = dev_rows
+    return row
+
+
 def main() -> None:
     load_mithril_dotenv()
     parser = argparse.ArgumentParser(
@@ -252,60 +314,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    import torch
-
-    host = _host_memory_snapshot()
-    recommended = _choose_recommended_device()
-    row: dict[str, Any] = {
-        "python": sys.version.split()[0],
-        "platform": platform.platform(),
-        "torch": torch.__version__,
-        "torch_cuda_build": torch.version.cuda,
-        "cuda_available": bool(torch.cuda.is_available()),
-        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
-        "mps_built": bool(torch.backends.mps.is_built()),
-        "mps_available": bool(torch.backends.mps.is_available()),
-        "mps_ready_mithril": bool(mps_ready()),
-        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-        "gemma4_quantization_default": infer_default_quantization(),
-        "host_memory": host,
-        "bitsandbytes": _bitsandbytes_note() if torch.cuda.is_available() else "skipped_no_cuda",
-        "devices": [],
-        "recommended_device": recommended,
-    }
-
-    if args.model:
-        mp = resolve_local_model_dir(args.model)
-        row["model_dir"] = str(mp)
-        row["model_config_present"] = (mp / "config.json").is_file()
-        row["model_weight_index_total_bytes"] = _model_weight_bytes_hint(mp)
-
-    mode = args.device
-    dev_rows: list[dict[str, Any]] = []
-    if mode == "auto":
-        if recommended.startswith("cuda") and torch.cuda.is_available():
-            cidx = args.cuda_device
-            if ":" in recommended:
-                try:
-                    cidx = int(recommended.split(":", 1)[1])
-                except ValueError:
-                    cidx = args.cuda_device
-            if 0 <= cidx < torch.cuda.device_count():
-                dev_rows.append(_report_cuda_line(cidx))
-        elif recommended == "mps" and mps_ready():
-            dev_rows.append({"kind": "mps", "index": 0, "name": "Apple MPS", "detail": "no_free_mem_api"})
-        else:
-            dev_rows.append({"kind": "cpu", "index": 0, "name": platform.processor() or "cpu"})
-    else:
-        if mode in ("all", "cuda") and torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                dev_rows.append(_report_cuda_line(i))
-        if mode in ("all", "mps") and mps_ready():
-            dev_rows.append({"kind": "mps", "index": 0, "name": "Apple MPS", "detail": "no_free_mem_api"})
-        if mode in ("all", "cpu") or (mode == "all" and not dev_rows):
-            dev_rows.append({"kind": "cpu", "index": 0, "name": platform.processor() or "cpu"})
-
-    row["devices"] = dev_rows
+    row = collect_system_snapshot(device=args.device, cuda_device=args.cuda_device, model=args.model)
+    dev_rows = list(row.get("devices", []))
+    host = row["host_memory"]
 
     probe_target = args.probe_device or row["recommended_device"]
     if args.allocate_mib > 0:
@@ -370,7 +381,10 @@ def main() -> None:
             f"  allocate_probe device={row.get('allocate_probe_target')!r} "
             f"mib={args.allocate_mib} ok={ap.get('ok')} err={ap.get('error')!r}"
         )
-    # TODO(system_check): optional nvml-based VRAM via pynvml when users install extras for richer telemetry
+
+
+
+# TODO(utils.device.system_check): optional nvml-based VRAM via pynvml when users install extras for richer telemetry
 
 
 if __name__ == "__main__":

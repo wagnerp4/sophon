@@ -8,8 +8,14 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
-models/
+models/*
+!models/README.md
 .env
 data/*
 !data/README.md
+!data/assets/
+!data/assets/**
+!data/benchmarks/
+!data/benchmarks/**
 evaluation_runs/
+data/exps/
