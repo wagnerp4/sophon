@@ -21,7 +21,7 @@ def _load_leann_searcher_cls() -> Any:
         from leann import LeannSearcher as LS
     except ImportError as exc:
         err = ImportError(
-            "LEANN native retriever requires the `leann` distribution (extras: mithril[rag-leann]). "
+            "LEANN native retriever requires the `leann` distribution (extras: orodruin[rag-leann]). "
             "Install from PyPI or pip install -e from Repos/RAG/LEANN/packages/leann."
         )
         _LeanSearchImportError = err
@@ -31,7 +31,7 @@ def _load_leann_searcher_cls() -> Any:
 
 
 def read_default_top_k_from_env() -> int:
-    top_k_raw = os.environ.get("MITHRIL_LEANN_TOP_K", "5").strip()
+    top_k_raw = os.environ.get("ORODRUIN_LEANN_TOP_K", "5").strip()
     try:
         return int(top_k_raw)
     except ValueError:
@@ -39,8 +39,8 @@ def read_default_top_k_from_env() -> int:
 
 
 def lean_native_retriever_from_env() -> RagRetriever | None:
-    """MITHRIL_LEANN_INDEX -> basename path passed to LeannSearcher (expects sibling .meta.json)."""
-    raw = os.environ.get("MITHRIL_LEANN_INDEX", "").strip()
+    """ORODRUIN_LEANN_INDEX -> basename path passed to LeannSearcher (expects sibling .meta.json)."""
+    raw = os.environ.get("ORODRUIN_LEANN_INDEX", "").strip()
     if not raw:
         return None
     return LeanNativeRetriever(raw, default_top_k=read_default_top_k_from_env())
@@ -61,6 +61,10 @@ class LeanNativeRetriever(RagRetriever):
         self._searcher = LS(index_path, **sk)
 
     def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
+        import time
+
+        from processing.text.retrieval.metrics import build_query_metrics
+
         params = dict(query.params)
         top_k = int(params.pop("top_k", self._default_top_k))
         complexity = int(params.pop("complexity", 64))
@@ -81,6 +85,7 @@ class LeanNativeRetriever(RagRetriever):
         provider_options = provider_any if isinstance(provider_any, dict) else None
         leftovers = dict(params)
         reco_kw = {"recompute_embeddings": recompute_embeddings} if isinstance(recompute_embeddings, bool) else {}
+        t0 = time.perf_counter()
         hits = self._searcher.search(
             query.text,
             top_k=top_k,
@@ -97,6 +102,7 @@ class LeanNativeRetriever(RagRetriever):
             **reco_kw,
             **leftovers,
         )
+        latency_s = time.perf_counter() - t0
         chunks: list[dict[str, object]] = []
         raw_hits: list[dict[str, object]] = []
         for item in hits:
@@ -109,9 +115,26 @@ class LeanNativeRetriever(RagRetriever):
                 }
             )
             raw_hits.append(asdict(item))
+        metrics = build_query_metrics(
+            latency_s=latency_s,
+            chunks=chunks,
+            top_k=top_k,
+            query_chars=len(query.text or ""),
+            backend_id=self.backend_id(),
+            extras={
+                "complexity": complexity,
+                "beam_width": beam_width,
+                "prune_ratio": prune_ratio,
+                "pruning_strategy": pruning_strategy,
+            },
+        )
         return RetrievalResult(
             chunks=chunks,
-            extras={"raw_hits": raw_hits, "backend_search_kwargs": leftovers},
+            extras={
+                "raw_hits": raw_hits,
+                "backend_search_kwargs": leftovers,
+                "metrics": metrics.as_dict(),
+            },
         )
 
     def backend_id(self) -> str:

@@ -1,0 +1,5 @@
+id,site,temp_c,humidity
+1,lab-a,21.4,0.42
+2,lab-b,19.8,0.51
+3,roof,14.2,0.33
+4,vault,18.0,0.47

@@ -11,11 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn as nn
 import transformers.modeling_utils as modeling_utils
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 from backend.hf.const import BUILTIN_SPECIAL_TOKEN_PATTERNS
 from backend.shared import bitsandbytes_config
+
+_MULTIMODAL_MODEL_TYPES = frozenset({"gemma4_unified"})
+_IMAGE_TEXT_MODEL_TYPES = frozenset({"gemma4", "gemma4_assistant"})
 
 
 _orig_caching_allocator_warmup = modeling_utils.caching_allocator_warmup
@@ -52,7 +56,7 @@ def _device_map_targets_mps(expanded_device_map: dict) -> bool:
     return False
 
 
-def _caching_allocator_warmup_mithril(model: object, expanded_device_map: dict, hf_quantizer: object) -> None:
+def _caching_allocator_warmup_orodruin(model: object, expanded_device_map: dict, hf_quantizer: object) -> None:
     if _device_map_targets_mps(expanded_device_map):
         return
     _orig_caching_allocator_warmup(model, expanded_device_map, hf_quantizer)
@@ -62,12 +66,19 @@ def install_mps_allocator_warmup_shim() -> None:
     global _mps_warmup_patch_installed
     if _mps_warmup_patch_installed:
         return
-    modeling_utils.caching_allocator_warmup = _caching_allocator_warmup_mithril
+    modeling_utils.caching_allocator_warmup = _caching_allocator_warmup_orodruin
     _mps_warmup_patch_installed = True
 
 
 def mps_ready() -> bool:
     return bool(torch.backends.mps.is_available() and torch.backends.mps.is_built())
+
+
+def _cuda_quantized_max_memory(reserve_gib: float = 1.5) -> dict[int | str, str]:
+    props = torch.cuda.get_device_properties(0)
+    total_gib = props.total_memory / (1024**3)
+    budget_gib = max(1.0, total_gib - reserve_gib)
+    return {0: f"{int(budget_gib)}GiB", "cpu": "0GiB"}
 
 
 def _make_ui_tqdm_hook(on_load_progress: Callable[[int, int, str], None]) -> Callable[..., Any]:
@@ -109,13 +120,99 @@ def _make_ui_tqdm_hook(on_load_progress: Callable[[int, int, str], None]) -> Cal
     return hook
 
 
-def _read_text_config_max_pos(model_path: str) -> int | None:
+def _read_config_json(model_path: str) -> dict[str, Any] | None:
     cfg_path = Path(model_path) / "config.json"
     if not cfg_path.is_file():
         return None
     try:
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_model_type(model_path: str) -> str | None:
+    data = _read_config_json(model_path)
+    if data is None:
+        return None
+    model_type = data.get("model_type")
+    return model_type if isinstance(model_type, str) and model_type else None
+
+
+def _require_gemma4_unified_support(model_type: str | None) -> None:
+    if model_type != "gemma4_unified":
+        return
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    if "gemma4_unified" in CONFIG_MAPPING:
+        return
+    raise ValueError(
+        "gemma4_unified requires transformers>=5.10.1. "
+        "From the orodruin repo run: uv sync"
+    )
+
+
+def _model_loader_for_type(model_type: str | None):
+    if model_type in _MULTIMODAL_MODEL_TYPES:
+        from transformers import AutoModelForMultimodalLM
+
+        return AutoModelForMultimodalLM.from_pretrained
+    if model_type in _IMAGE_TEXT_MODEL_TYPES:
+        from transformers import AutoModelForImageTextToText
+
+        return AutoModelForImageTextToText.from_pretrained
+    return AutoModelForCausalLM.from_pretrained
+
+
+def _model_uses_chat_template_inputs(model_type: str | None) -> bool:
+    if model_type is None:
+        return False
+    return model_type in _MULTIMODAL_MODEL_TYPES or model_type in _IMAGE_TEXT_MODEL_TYPES
+
+
+def _apply_chat_inputs(
+    processor: AutoProcessor,
+    messages: list[dict[str, object]],
+    *,
+    enable_thinking: bool,
+    add_generation_prompt: bool,
+) -> dict[str, torch.Tensor]:
+    template_kwargs: dict[str, object] = {
+        "conversation": messages,
+        "tokenize": True,
+        "return_dict": True,
+        "return_tensors": "pt",
+        "add_generation_prompt": add_generation_prompt,
+    }
+    try:
+        inputs = processor.apply_chat_template(**template_kwargs, enable_thinking=enable_thinking)
+    except TypeError:
+        inputs = processor.apply_chat_template(**template_kwargs)
+    if isinstance(inputs, dict):
+        return inputs
+    input_ids = getattr(inputs, "get", lambda _k, _d=None: None)("input_ids")
+    if input_ids is None:
+        raise TypeError("apply_chat_template did not return tokenized multimodal inputs.")
+    return inputs
+
+
+def _move_inputs_to_model(inputs: dict[str, torch.Tensor], model: nn.Module) -> dict[str, torch.Tensor]:
+    device = model.device
+    dtype = getattr(model, "dtype", None)
+    moved: dict[str, torch.Tensor] = {}
+    for key, value in inputs.items():
+        if not isinstance(value, torch.Tensor):
+            continue
+        tensor = value.to(device)
+        if dtype is not None and tensor.is_floating_point():
+            tensor = tensor.to(dtype=dtype)
+        moved[key] = tensor
+    return moved
+
+
+def _read_text_config_max_pos(model_path: str) -> int | None:
+    data = _read_config_json(model_path)
+    if data is None:
         return None
     candidates: list[Any] = []
     if isinstance(data, dict):
@@ -199,7 +296,7 @@ def _log_load(
     if cb is not None:
         cb(0, 0, description)
         return
-    print(f"mithril: {description}", file=sys.stderr, flush=True)
+    print(f"orodruin: {description}", file=sys.stderr, flush=True)
 
 
 def load_processor_and_model(
@@ -207,7 +304,8 @@ def load_processor_and_model(
     quantization: str,
     *,
     on_load_progress: Callable[[int, int, str], None] | None = None,
-) -> tuple[AutoProcessor, AutoModelForCausalLM]:
+    adapter_path: str | None = None,
+) -> tuple[AutoProcessor, nn.Module]:
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     install_mps_allocator_warmup_shim()
     import transformers.utils.logging as _tr_logging
@@ -238,6 +336,7 @@ def load_processor_and_model(
                 )
             model_kw["device_map"] = "auto"
             model_kw["quantization_config"] = bnb
+            model_kw["max_memory"] = _cuda_quantized_max_memory()
         else:
             model_kw["dtype"] = "auto"
             if mps_ready():
@@ -255,13 +354,28 @@ def load_processor_and_model(
             on_load_progress,
             "loading weights. progress may pause for minutes on a large shard or 4-bit init.",
         )
+        model_type = _read_model_type(model_path)
+        _require_gemma4_unified_support(model_type)
+        model_loader = _model_loader_for_type(model_type)
         try:
-            model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
+            model = model_loader(model_path, local_files_only=True, **model_kw)
         except TypeError as exc:
             if sys.platform != "win32" or "disable_mmap" not in str(exc):
                 raise
             model_kw.pop("disable_mmap", None)
-            model = AutoModelForCausalLM.from_pretrained(model_path, local_files_only=True, **model_kw)
+            model = model_loader(model_path, local_files_only=True, **model_kw)
+        if adapter_path:
+            adapter_resolved = Path(adapter_path).expanduser().resolve()
+            if not adapter_resolved.is_dir():
+                raise ValueError(f"adapter directory not found: {adapter_resolved}")
+            _log_load(on_load_progress, f"loading LoRA adapter from {adapter_resolved} ...")
+            try:
+                from peft import PeftModel
+            except ImportError as exc:
+                raise ValueError(
+                    "loading adapters requires peft. Run: uv sync --extra finetune"
+                ) from exc
+            model = PeftModel.from_pretrained(model, str(adapter_resolved))
         _log_load(on_load_progress, "model load finished.")
         return processor, model
     finally:
@@ -293,29 +407,41 @@ def count_prompt_tokens(
     messages: list[dict[str, object]],
     *,
     enable_thinking: bool = False,
+    model_type: str | None = None,
 ) -> int:
     try:
-        try:
-            text = processor.apply_chat_template(
+        if _model_uses_chat_template_inputs(model_type):
+            inputs = _apply_chat_inputs(
+                processor,
                 messages,
-                tokenize=False,
-                add_generation_prompt=True,
                 enable_thinking=enable_thinking,
-            )
-        except TypeError:
-            text = processor.apply_chat_template(
-                messages,
-                tokenize=False,
                 add_generation_prompt=True,
             )
-        inputs = processor(text=text, return_tensors="pt")
-        ids = inputs.get("input_ids") if isinstance(inputs, dict) else inputs["input_ids"]
+            ids = inputs.get("input_ids")
+        else:
+            try:
+                text = processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=enable_thinking,
+                )
+            except TypeError:
+                text = processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            inputs = processor(text=text, return_tensors="pt")
+            ids = inputs.get("input_ids") if isinstance(inputs, dict) else inputs["input_ids"]
+        if ids is None:
+            return 0
         return int(ids.shape[-1])
     except Exception:
         return 0
 
 
-def _resolve_eos_ids(model: AutoModelForCausalLM, override: list[int] | None) -> list[int]:
+def _resolve_eos_ids(model: nn.Module, override: list[int] | None) -> list[int]:
     if override:
         return [int(x) for x in override]
     gc = getattr(model, "generation_config", None)
@@ -329,7 +455,7 @@ def _resolve_eos_ids(model: AutoModelForCausalLM, override: list[int] | None) ->
 
 def generate_response(
     processor: AutoProcessor,
-    model: AutoModelForCausalLM,
+    model: nn.Module,
     messages: list[dict[str, object]],
     max_new_tokens: int,
     enable_thinking: bool,
@@ -343,21 +469,34 @@ def generate_response(
     strip: bool = True,
     extra_specials: list[str] | None = None,
     eos_token_ids: list[int] | None = None,
+    model_type: str | None = None,
 ) -> GenerationResult:
-    try:
-        text = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=enable_thinking,
+    resolved_model_type = model_type or getattr(getattr(model, "config", None), "model_type", None)
+    if _model_uses_chat_template_inputs(resolved_model_type):
+        inputs = _move_inputs_to_model(
+            _apply_chat_inputs(
+                processor,
+                messages,
+                enable_thinking=enable_thinking,
+                add_generation_prompt=True,
+            ),
+            model,
         )
-    except TypeError:
-        text = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    inputs = processor(text=text, return_tensors="pt").to(model.device)
+    else:
+        try:
+            text = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            )
+        except TypeError:
+            text = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        inputs = processor(text=text, return_tensors="pt").to(model.device)
     input_len = int(inputs["input_ids"].shape[-1])
 
     gen_kwargs: dict[str, Any] = {"max_new_tokens": max_new_tokens}
@@ -384,7 +523,7 @@ def generate_response(
             torch.cuda.manual_seed_all(int(seed))
 
     t0 = time.perf_counter()
-    outputs = model.generate(**inputs, **gen_kwargs)
+    outputs = model.generate(**inputs, **gen_kwargs)  # type: ignore[call-arg]
     gen_time_s = max(0.0, time.perf_counter() - t0)
 
     new_token_ids = outputs[0][input_len:]
@@ -439,4 +578,3 @@ def parsed_to_display_text(parsed: object) -> str:
     return str(parsed)
 
 
-# TODO(multimodal): Switch to AutoModelForMultimodalLM when prompting with images or video.

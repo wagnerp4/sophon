@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Literal
 
-BackendId = Literal["hf", "ollama"]
+from backend.chat_resolve import ChatBackendId, chat_backend_ids
 
-_BACKEND_IDS: tuple[BackendId, ...] = ("hf", "ollama")
+BackendId = Literal["hf", "ollama", "lmstudio"]
+
+_BACKEND_IDS: tuple[BackendId, ...] = ("hf", "ollama", "lmstudio")
 
 
 def backend_ids() -> tuple[BackendId, ...]:
@@ -18,6 +20,10 @@ def load_backend(backend_id: BackendId):
         return backend
     if backend_id == "ollama":
         from backend.ollama import backend
+
+        return backend
+    if backend_id == "lmstudio":
+        from backend.lmstudio import backend
 
         return backend
     raise KeyError(f"unknown backend {backend_id!r}")
@@ -35,7 +41,12 @@ def supported_preset_keys(backend_id: BackendId) -> list[str]:
     return []
 
 
-# TODO(custom-arch): Non-Auto loaders (custom model code) should live under backend/hf/
-# (new modules or a plugins/ subpackage) and be selected from here. Ollama-specific
-# helpers stay under backend/ollama/.
-
+__all__ = [
+    "BackendId",
+    "ChatBackendId",
+    "backend_ids",
+    "chat_backend_ids",
+    "hf_model_preset_keys",
+    "load_backend",
+    "supported_preset_keys",
+]

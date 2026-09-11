@@ -20,7 +20,7 @@ from typing import Any
 
 from backend.hf.backend import mps_ready
 from backend.hf.paths import infer_default_quantization, resolve_local_model_dir
-from utils.device.env_bootstrap import load_mithril_dotenv
+from utils.device.env_bootstrap import load_orodruin_dotenv
 
 
 def _fmt_bytes(n: int) -> str:
@@ -228,7 +228,7 @@ def collect_system_snapshot(
         "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
         "mps_built": bool(torch.backends.mps.is_built()),
         "mps_available": bool(torch.backends.mps.is_available()),
-        "mps_ready_mithril": bool(mps_ready()),
+        "mps_ready_orodruin": bool(mps_ready()),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
         "gemma4_quantization_default": infer_default_quantization(),
         "host_memory": host,
@@ -273,9 +273,9 @@ def collect_system_snapshot(
 
 
 def main() -> None:
-    load_mithril_dotenv()
+    load_orodruin_dotenv()
     parser = argparse.ArgumentParser(
-        description="Host and PyTorch device checks for mithril (CUDA, MPS, CPU, memory hints).",
+        description="Host and PyTorch device checks for orodruin (CUDA, MPS, CPU, memory hints).",
     )
     parser.add_argument(
         "--device",
@@ -334,13 +334,13 @@ def main() -> None:
         print(json.dumps(row, indent=2))
         return
 
-    print("mithril system check")
+    print("orodruin system check")
     print(f"  python={row['python']} platform={row['platform']}")
     print(f"  torch={row['torch']} torch.version.cuda={row['torch_cuda_build']}")
     print(f"  cuda_available={row['cuda_available']} count={row['cuda_device_count']}")
     print(
         f"  mps built={row['mps_built']} available={row['mps_available']} "
-        f"mithril_mps_ready={row['mps_ready_mithril']}"
+        f"orodruin_mps_ready={row['mps_ready_orodruin']}"
     )
     vis = row["cuda_visible_devices"]
     if vis:

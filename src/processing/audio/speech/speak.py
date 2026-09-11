@@ -21,6 +21,7 @@ def speak_text_blocking(
     max_chars: int,
     emit: EmitFn,
     plain_text: bool,
+    speed: float = 1.0,
 ) -> None:
     try:
         import soundfile as sf
@@ -38,7 +39,13 @@ def speak_text_blocking(
 
     path: Path | None = None
     try:
-        wav, sr = engine.synthesize(trimmed, speaker=speaker, language=language, instruct=instruct)
+        wav, sr = engine.synthesize(
+            trimmed,
+            speaker=speaker,
+            language=language,
+            instruct=instruct,
+            speed=float(speed),
+        )
         fh = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         fh.close()
         path = Path(fh.name)

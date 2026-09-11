@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+_WEIGHT_SHARD_RE = re.compile(r"^(model|pytorch_model)-(\d+)-of-(\d+)\.(safetensors|bin)$")
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,12 @@ _GOOGLE_PRESET_ROWS: tuple[PresetRow, ...] = (
     ("gemma4_31b", "google/gemma-4-31B", "Gemma 4 31B image-text-to-text base."),  # Hub: image-text-to-text
     ("gemma4_26b_a4b_it", "google/gemma-4-26B-A4B-it", "Gemma 4 26B-A4B MoE image-text-to-text instruct."),  # Hub: image-text-to-text
     ("gemma4_26b_a4b", "google/gemma-4-26B-A4B", "Gemma 4 26B-A4B MoE image-text-to-text base."),  # Hub: image-text-to-text
+    (  # Hub: any-to-any
+        "gemma4_12b_it",
+        "google/gemma-4-12B-it",
+        "Gemma 4 12B unified encoder-free any-to-any instruct.",
+        "models/google-gemma-4-12b-it",
+    ),
     ("gemma4_e4b_it", "google/gemma-4-E4B-it", "Gemma 4 E4B (~8B) any-to-any instruct."),  # Hub: any-to-any
     ("gemma4_e4b", "google/gemma-4-E4B", "Gemma 4 E4B (~8B) any-to-any base."),  # Hub: any-to-any
     ("gemma4_e2b_it", "google/gemma-4-E2B-it", "Gemma 4 E2B (~5B) any-to-any instruct."),  # Hub: any-to-any
@@ -134,14 +144,66 @@ def resolve_preset_dir(preset_key: str, cwd: Path | None = None) -> Path:
     return (base / preset.default_local_dir).expanduser().resolve()
 
 
+def _index_shards_complete(model_dir: Path, index_name: str) -> bool:
+    index_path = model_dir / index_name
+    if not index_path.is_file():
+        return False
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    weight_map = data.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        return False
+    shards = {str(name) for name in weight_map.values()}
+    return bool(shards) and all((model_dir / shard).is_file() for shard in shards)
+
+
+def _numbered_shards_complete(model_dir: Path, prefix: str, suffix: str) -> bool:
+    shards_by_total: dict[int, set[int]] = {}
+    for path in model_dir.iterdir():
+        if not path.is_file():
+            continue
+        match = _WEIGHT_SHARD_RE.match(path.name)
+        if match is None or match.group(1) != prefix or match.group(4) != suffix:
+            continue
+        shard_index = int(match.group(2))
+        shard_total = int(match.group(3))
+        shards_by_total.setdefault(shard_total, set()).add(shard_index)
+    for shard_total, found in shards_by_total.items():
+        if found == set(range(1, shard_total + 1)):
+            return True
+    return False
+
+
+def model_dir_has_complete_weights(model_dir: Path) -> bool:
+    if not model_dir.is_dir():
+        return False
+    for single_name in ("model.safetensors", "pytorch_model.bin"):
+        if (model_dir / single_name).is_file():
+            return True
+    if _index_shards_complete(model_dir, "model.safetensors.index.json"):
+        return True
+    if _index_shards_complete(model_dir, "pytorch_model.bin.index.json"):
+        return True
+    if _numbered_shards_complete(model_dir, "model", "safetensors"):
+        return True
+    if _numbered_shards_complete(model_dir, "pytorch_model", "bin"):
+        return True
+    return False
+
+
 def preset_has_weights(preset_key: str, cwd: Path | None = None) -> bool:
-    return (resolve_preset_dir(preset_key, cwd) / "config.json").is_file()
+    model_dir = resolve_preset_dir(preset_key, cwd)
+    if not (model_dir / "config.json").is_file():
+        return False
+    return model_dir_has_complete_weights(model_dir)
 
 
 def local_only_model_dirs(cwd: Path | None = None) -> list[Path]:
-    from utils.device.env_bootstrap import mithril_project_root
+    from utils.device.env_bootstrap import orodruin_project_root
 
-    base = cwd if cwd is not None else mithril_project_root()
+    base = cwd if cwd is not None else orodruin_project_root()
     models_root = base / "models"
     if not models_root.is_dir():
         return []
@@ -151,7 +213,11 @@ def local_only_model_dirs(cwd: Path | None = None) -> list[Path]:
         if not sub.is_dir():
             continue
         resolved = sub.resolve()
-        if (resolved / "config.json").is_file() and resolved not in preset_paths:
+        if (
+            (resolved / "config.json").is_file()
+            and model_dir_has_complete_weights(resolved)
+            and resolved not in preset_paths
+        ):
             out.append(resolved)
     return out
 
@@ -179,11 +245,79 @@ def match_preset_key(token: str) -> str | None:
 PREFERRED_DEFAULT_KEY = "llama2_7b_chat"
 
 
-def default_preset_key() -> str:
-    from utils.device.env_bootstrap import mithril_project_root
+def preset_key_for_dir(model_dir: Path, cwd: Path | None = None) -> str | None:
+    from utils.device.env_bootstrap import orodruin_project_root
 
-    base = mithril_project_root()
-    raw = os.environ.get("MITHRIL_HF_PRESET", "").strip()
+    base = cwd if cwd is not None else orodruin_project_root()
+    want = model_dir.expanduser().resolve()
+    for key in preset_keys_sorted():
+        if resolve_preset_dir(key, base).resolve() == want:
+            return key
+    return None
+
+
+def default_local_preset_key(cwd: Path | None = None) -> str | None:
+    from utils.device.env_bootstrap import orodruin_project_root
+
+    base = cwd if cwd is not None else orodruin_project_root()
+    if preset_has_weights(PREFERRED_DEFAULT_KEY, base):
+        return PREFERRED_DEFAULT_KEY
+    for key in preset_keys_sorted():
+        if key == PREFERRED_DEFAULT_KEY:
+            continue
+        if preset_has_weights(key, base):
+            return key
+    return None
+
+
+def resolve_chat_startup_model(
+    *,
+    preset: str | None,
+    model: str | None,
+    cwd: Path | None = None,
+) -> tuple[str | None, Path]:
+    from utils.device.env_bootstrap import orodruin_project_root
+
+    base = cwd if cwd is not None else orodruin_project_root()
+    fallback_dir = resolve_preset_dir(PREFERRED_DEFAULT_KEY, base)
+
+    if preset is not None:
+        return preset, resolve_preset_dir(preset, base)
+    if model is not None:
+        path = Path(model).expanduser().resolve()
+        return preset_key_for_dir(path, base), path
+
+    env_preset = os.environ.get("ORODRUIN_HF_PRESET", "").strip()
+    if env_preset in HF_MODEL_PRESETS and preset_has_weights(env_preset, base):
+        return env_preset, resolve_preset_dir(env_preset, base)
+
+    env_path = os.environ.get("GEMMA4_MODEL", "").strip()
+    if env_path:
+        path = Path(env_path).expanduser().resolve()
+        if model_dir_has_complete_weights(path) and (path / "config.json").is_file():
+            return preset_key_for_dir(path, base), path
+
+    env_dir = os.environ.get("GEMMA4_LOCAL_DIR", "").strip()
+    if env_dir:
+        path = Path(env_dir).expanduser().resolve()
+        if model_dir_has_complete_weights(path) and (path / "config.json").is_file():
+            return preset_key_for_dir(path, base), path
+
+    local_key = default_local_preset_key(base)
+    if local_key is not None:
+        return local_key, resolve_preset_dir(local_key, base)
+
+    for path in local_only_model_dirs(base):
+        return None, path
+
+    return None, fallback_dir
+
+
+def default_preset_key() -> str:
+    from utils.device.env_bootstrap import orodruin_project_root
+
+    base = orodruin_project_root()
+    raw = os.environ.get("ORODRUIN_HF_PRESET", "").strip()
     if raw in HF_MODEL_PRESETS:
         return raw
     env_path = os.environ.get("GEMMA4_MODEL", "").strip()
@@ -201,14 +335,9 @@ def default_preset_key() -> str:
                 return key
             if pk.name == want.name:
                 return key
-    if PREFERRED_DEFAULT_KEY in HF_MODEL_PRESETS:
-        p_pref = resolve_preset_dir(PREFERRED_DEFAULT_KEY, base)
-        if (p_pref / "config.json").is_file():
-            return PREFERRED_DEFAULT_KEY
-    for key in preset_keys_sorted():
-        p = resolve_preset_dir(key, base)
-        if (p / "config.json").is_file():
-            return key
+    local_key = default_local_preset_key(base)
+    if local_key is not None:
+        return local_key
     models_root = base / "models"
     if models_root.is_dir():
         for sub in sorted(models_root.iterdir(), key=lambda x: x.name.lower()):

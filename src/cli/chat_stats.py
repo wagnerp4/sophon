@@ -223,6 +223,32 @@ class SessionStats:
             f"{self.max_position_embeddings} tokens. Consider /reset or /pop."
         )
 
+    def format_banner_stats(self) -> str:
+        if self.last_turn is None:
+            return ""
+        t = self.last_turn
+        parts: list[str] = [f"{self.turns}t"]
+        if t.new_tokens > 0:
+            parts.append(f"out={t.new_tokens}")
+        if t.tok_s > 0:
+            parts.append(f"{t.tok_s:.1f}tok/s")
+        elif t.gen_time_s > 0:
+            parts.append(f"{t.gen_time_s:.2f}s")
+        if self.ema_tok_s is not None and self.ema_tok_s > 0:
+            parts.append(f"ema={self.ema_tok_s:.1f}")
+        if self.peak_tok_s > 0 and self.turns > 1:
+            parts.append(f"peak={self.peak_tok_s:.1f}")
+        if t.input_tokens > 0:
+            ctx = f"ctx={self.last_ctx_tokens}"
+            if self.max_position_embeddings:
+                ctx += f"/{self.max_position_embeddings}"
+            parts.append(ctx)
+        elif self.last_ctx_tokens > 0:
+            parts.append(f"ctx={self.last_ctx_tokens}")
+        if self.last_vram_used_bytes is not None and self.last_vram_used_bytes > 0:
+            parts.append(f"vram={_fmt_mib(self.last_vram_used_bytes)}")
+        return " · ".join(parts)
+
     def format_footer(self) -> str:
         if self.last_turn is None:
             return "[dbg] no turns yet"
@@ -293,5 +319,5 @@ class SessionStats:
 
 
 def initial_debug_mode_from_env() -> bool:
-    raw = os.environ.get("MITHRIL_CHAT_DEBUG", "").strip().lower()
+    raw = os.environ.get("ORODRUIN_CHAT_DEBUG", "").strip().lower()
     return raw in ("1", "true", "yes", "on")

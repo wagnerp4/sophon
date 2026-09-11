@@ -8,12 +8,12 @@ from .sqlite_memory import SqliteMemoryStore
 
 
 def open_memory_store(path: str | Path | None) -> MemoryStore | None:
-    """Resolve --memory-db path. Falls back to MITHRIL_MEMORY_DB env. Returns None if neither is set."""
+    """Resolve --memory-db path. Falls back to ORODRUIN_MEMORY_DB env. Returns None if neither is set."""
     resolved = ""
     if path is not None:
         resolved = str(path).strip()
     if not resolved:
-        resolved = os.environ.get("MITHRIL_MEMORY_DB", "").strip()
+        resolved = os.environ.get("ORODRUIN_MEMORY_DB", "").strip()
     if not resolved:
         return None
     return SqliteMemoryStore(resolved)

@@ -10,7 +10,7 @@ _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent mithril.* imports end-to-end.
+# Todo: remove this path bootstrap after the package uses consistent orodruin.* imports end-to-end.
 
 from backend.hf.backend import (
     generate_response,
@@ -91,7 +91,7 @@ def main() -> None:
 
     from cli.terminal import infer_command as _infer
 
-    _infer.main(args=_sys.argv[1:], prog_name="mithril-infer", standalone_mode=True)
+    _infer.main(args=_sys.argv[1:], prog_name="orodruin-infer", standalone_mode=True)
 
 
 if __name__ == "__main__":

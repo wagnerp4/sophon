@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
+import re
 import sys
-from collections.abc import Callable
+import threading
+import time
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,9 +20,256 @@ from tqdm.auto import tqdm as TqdmAuto
 from backend.hf.registry import HF_MODEL_PRESETS, resolve_preset_dir
 
 
+def scan_local_dir_download_bytes(local_dir: Path) -> int:
+    total = 0
+    if not local_dir.is_dir():
+        return 0
+    cache_download = local_dir / ".cache" / "huggingface" / "download"
+    if cache_download.is_dir():
+        for path in cache_download.iterdir():
+            if path.is_file():
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    pass
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        weight = local_dir / name
+        if weight.is_file():
+            try:
+                total += weight.stat().st_size
+            except OSError:
+                pass
+    for shard in local_dir.glob("model-*-of-*.safetensors"):
+        if shard.is_file():
+            try:
+                total += shard.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+@contextmanager
+def watch_local_download_bytes(
+    local_dir: Path,
+    on_disk_bytes: Callable[[int], None],
+    *,
+    interval_s: float = 2.0,
+) -> Iterator[None]:
+    stop = threading.Event()
+
+    def poll() -> None:
+        last = -1
+        while not stop.wait(interval_s):
+            nbytes = scan_local_dir_download_bytes(local_dir)
+            if nbytes > 0 and nbytes != last:
+                last = nbytes
+                on_disk_bytes(nbytes)
+
+    thread = threading.Thread(target=poll, name="orodruin-download-watch", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=interval_s + 1.0)
+
+
 def hub_token_for_snapshot() -> str | bool:
     raw = os.environ.get("HF_TOKEN", "").strip()
     return raw if raw else True
+
+
+def format_byte_count(value: int | float) -> str:
+    amount = float(value)
+    ax = abs(amount)
+    for label, div in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
+        if ax >= div:
+            return f"{amount / div:.2f} {label}"
+    return f"{amount:.0f} B"
+
+
+def format_byte_progress_pair(n: int, total: int) -> str:
+    if total > 0:
+        pct = min(100, int((n / total) * 100))
+        return f"{format_byte_count(n)} / {format_byte_count(total)} ({pct}%)"
+    if n > 0:
+        return format_byte_count(n)
+    return "0 B"
+
+
+def format_progress_bar(n: int, total: int, width: int = 20) -> str:
+    if total <= 0:
+        return "░" * width
+    filled = min(width, int((n / total) * width))
+    return ("█" * filled) + ("░" * (width - filled))
+
+
+def normalize_hub_phase(desc: str) -> str:
+    phase = desc.strip()
+    if not phase:
+        return "preparing download"
+    if phase == "Downloading (incomplete total...)":
+        return "waiting for first bytes (Hub is resolving shard sizes / XET handshake)"
+    if phase.startswith("Fetching "):
+        return phase
+    if phase == "Download complete":
+        return "download complete"
+    return phase
+
+
+def is_file_count_progress(n: int, total: int, desc: str) -> bool:
+    if desc.startswith("Fetching "):
+        return True
+    return total > 0 and total <= 4096 and n <= total
+
+
+def format_idle_download_hint() -> str:
+    return (
+        "no bytes yet — after xet-read-token, the ~22 GiB shard can take several minutes "
+        "to begin streaming"
+    )
+
+
+def split_hub_progress_label(label: str) -> tuple[str, str]:
+    text = label.strip()
+    if " · " in text:
+        phase, detail = text.split(" · ", 1)
+        return normalize_hub_phase(phase), detail.strip()
+    return normalize_hub_phase(text), format_byte_progress_pair(0, 0)
+
+
+def format_download_progress(n: int, total: int, desc: str = "") -> str:
+    phase = normalize_hub_phase(desc)
+    detail = format_byte_progress_pair(n, total)
+    bar = format_progress_bar(n, total)
+    if phase:
+        return f"{phase}\n[{bar}] {detail}"
+    return f"[{bar}] {detail}"
+
+
+def _format_hub_log_line(logger_name: str, message: str) -> str | None:
+    text = message.strip()
+    if not text:
+        return None
+    if logger_name.startswith("huggingface_hub"):
+        if "Number of files in the repo is unreliable" in text:
+            return "hub: large repo — listing all files from Hub (can take a while)"
+        if text.startswith("Fetching ") or "snapshot" in text.lower():
+            return f"hub: {text}"
+        return None
+    if logger_name == "httpx":
+        if "huggingface.co" not in text or "HTTP Request:" not in text:
+            return None
+        if "xet-read-token" in text:
+            return "hub: XET read token OK — negotiating ~22 GiB weight stream (can take 1–5 min before first byte)"
+        if "HEAD" in text and "model.safetensors" in text:
+            return "hub: HEAD model.safetensors — size confirmed, preparing download"
+        if "HEAD" in text:
+            head_match = re.search(r"/(?:resolve|blob)/[^/]+/[^/]+/(.+?)(?:\s|$)", text)
+            if head_match is not None:
+                name = head_match.group(1).strip()
+                return f"hub: HEAD {name}"
+        file_match = re.search(r"/(?:resolve|blob)/[^/]+/[^/]+/(.+?)(?:\s|$)", text)
+        if file_match is not None:
+            name = file_match.group(1).strip()
+            if len(name) > 72:
+                name = f"(…){name[-68:]}"
+            return f"hub: GET {name}"
+        repo_match = re.search(r"huggingface\.co/(?:api/)?models/([^?\s\"/]+/[^?\s\"/]+)", text)
+        if repo_match is not None:
+            return f"hub: resolving {repo_match.group(1)}"
+    return None
+
+
+@contextmanager
+def capture_hub_download_logs(
+    emit: Callable[[str], None],
+    *,
+    min_interval_s: float = 0.8,
+) -> Iterator[None]:
+    state = {"last_emit": 0.0, "seen": set()}
+
+    class _HubLogHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            line = _format_hub_log_line(record.name, record.getMessage())
+            if line is None or line in state["seen"]:
+                return
+            urgent = (
+                "XET read token" in line
+                or "HEAD model.safetensors" in line
+                or "listing all files" in line
+            )
+            now = time.monotonic()
+            if not urgent and (now - state["last_emit"]) < min_interval_s:
+                return
+            state["last_emit"] = now
+            state["seen"].add(line)
+            emit(line)
+
+    handler = _HubLogHandler()
+    handler.setLevel(logging.INFO)
+    targets = [
+        logging.getLogger("huggingface_hub"),
+        logging.getLogger("httpx"),
+    ]
+    previous_levels = [(logger, logger.level) for logger in targets]
+    for logger in targets:
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    try:
+        yield
+    finally:
+        handler.close()
+        for logger, level in previous_levels:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+
+
+def throttled_progress_callback(
+    on_progress: Callable[[int, int, str], None],
+    *,
+    min_interval_s: float = 0.2,
+) -> Callable[[int, int, str], None]:
+    state = {"last_emit": 0.0, "last_n": -1, "last_total": -1}
+
+    def emit(n: int, total: int, label: str) -> None:
+        now = time.monotonic()
+        done = total > 0 and n >= total
+        changed = n != state["last_n"] or total != state["last_total"]
+        if not done and not changed and (now - state["last_emit"]) < min_interval_s:
+            return
+        state["last_emit"] = now
+        state["last_n"] = n
+        state["last_total"] = total
+        on_progress(n, total, label)
+
+    return emit
+
+
+@contextmanager
+def capture_hub_user_warnings(emit: Callable[[str], None]) -> Iterator[None]:
+    seen: set[str] = set()
+
+    def showwarning(
+        message: Warning | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file: object | None = None,
+        line: str | None = None,
+    ) -> None:
+        text = str(message).strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        emit(text)
+
+    previous = warnings.showwarning
+    warnings.showwarning = showwarning
+    try:
+        yield
+    finally:
+        warnings.showwarning = previous
 
 
 def configure_hub_verbose(*, force_tqdm: bool = True) -> None:
@@ -41,12 +294,15 @@ def hub_tqdm_bridge_factory(
     class _HubTqdmBridge(TqdmAuto):
         def __init__(self, *args, **kwargs) -> None:
             kwargs.pop("name", None)
-            kwargs["disable"] = True
             kwargs.setdefault("mininterval", 0.2)
+            kwargs.setdefault("leave", False)
+            kwargs.setdefault("disable", False)
+            if kwargs.get("file") is None:
+                kwargs["file"] = open(os.devnull, "w", encoding="utf-8")
             super().__init__(*args, **kwargs)
-            self._mithril_emit()
+            self._orodruin_emit()
 
-        def _mithril_total_n(self) -> tuple[int, int]:
+        def _orodruin_total_n(self) -> tuple[int, int]:
             tot_raw = getattr(self, "total", None)
             if tot_raw is None or (isinstance(tot_raw, float) and math.isnan(tot_raw)):
                 total = 0
@@ -56,52 +312,44 @@ def hub_tqdm_bridge_factory(
             n = max(0, int(n_raw))
             return n, total
 
-        def _mithril_emit(self) -> None:
-            n, total = self._mithril_total_n()
+        def _orodruin_emit(self) -> None:
+            n, total = self._orodruin_total_n()
             desc = str(getattr(self, "desc", "") or "").strip()
             unit = str(getattr(self, "unit", "") or "")
             unit_scale = bool(getattr(self, "unit_scale", False))
-
-            if unit == "B" and unit_scale:
-
-                def fmt(x: float) -> str:
-                    ax = abs(x)
-                    for label, div in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
-                        if ax >= div:
-                            return f"{x / div:.2f} {label}"
-                    return f"{x:.0f} B"
-
+            use_bytes = (unit == "B" and unit_scale) or total >= 1024 or n >= 1024
+            if use_bytes:
+                label = format_download_progress(n, total, desc)
+            elif is_file_count_progress(n, total, desc):
                 if total > 0:
-                    detail = f"{fmt(float(n))} / {fmt(float(total))}"
+                    detail = f"{n} / {total} files"
                 else:
-                    detail = fmt(float(n))
+                    detail = "enumerating files..."
+                label = f"{desc} · {detail}" if desc else detail
             elif total > 0:
                 detail = f"{n} / {total}" + (f" {unit}" if unit else "")
+                label = f"{desc} · {detail}" if desc else detail
             else:
                 detail = f"{n}" + (f" {unit}" if unit else "")
-
-            if desc:
-                label = f"{desc} · {detail}"
-            else:
-                label = detail
+                label = f"{desc} · {detail}" if desc else detail
             on_progress(n, total, label)
 
         def update(self, n: int | float | None = 1) -> bool | None:
             r = super().update(n)
-            self._mithril_emit()
+            self._orodruin_emit()
             return r
 
         def refresh(self, nolock: bool = False, lock_args=None) -> None:
             super().refresh(nolock=nolock, lock_args=lock_args)
-            self._mithril_emit()
+            self._orodruin_emit()
 
         def set_description(self, desc: str | None = None, refresh: bool = True) -> None:
             super().set_description(desc, refresh=refresh)
-            self._mithril_emit()
+            self._orodruin_emit()
 
         def close(self) -> None:
             try:
-                self._mithril_emit()
+                self._orodruin_emit()
             finally:
                 super().close()
 
@@ -116,6 +364,7 @@ def snapshot_hf_files(
     *,
     verbose: bool,
     preset_key_for_log: str | None = None,
+    on_status: Callable[[str], None] | None = None,
 ) -> Path:
     resolved = local_dir.expanduser().resolve()
     kwargs: dict[str, object] = {
@@ -127,28 +376,36 @@ def snapshot_hf_files(
         kwargs["revision"] = revision
     if tqdm_class is not None:
         kwargs["tqdm_class"] = tqdm_class
+    if tqdm_class is None and verbose:
+        configure_hub_verbose(force_tqdm=True)
+    if on_status is not None:
+        on_status(f"resolving {repo_id} on Hugging Face Hub")
+        on_status(f"target directory: {resolved}")
+        on_status("fetching repo metadata and file list (first contact can take minutes)")
     if verbose:
         if preset_key_for_log is not None:
             print(
-                f"mithril: Hub pull preset={preset_key_for_log!r} repo_id={repo_id!r}",
+                f"orodruin: Hub pull preset={preset_key_for_log!r} repo_id={repo_id!r}",
                 file=sys.stderr,
                 flush=True,
             )
-            print(f"mithril: local_dir={resolved}", file=sys.stderr, flush=True)
+            print(f"orodruin: local_dir={resolved}", file=sys.stderr, flush=True)
         else:
             print(
-                f"mithril: Hub pull repo_id={repo_id!r} local_dir={resolved}",
+                f"orodruin: Hub pull repo_id={repo_id!r} local_dir={resolved}",
                 file=sys.stderr,
                 flush=True,
             )
         print(
-            "mithril: calling snapshot_download (repo metadata and file list can take minutes on first contact)…",
+            "orodruin: calling snapshot_download (repo metadata and file list can take minutes on first contact)…",
             file=sys.stderr,
             flush=True,
         )
     snapshot_download(**kwargs)
+    if on_status is not None:
+        on_status("snapshot_download finished")
     if verbose:
-        print("mithril: snapshot_download finished.", file=sys.stderr, flush=True)
+        print("orodruin: snapshot_download finished.", file=sys.stderr, flush=True)
     return resolved
 
 
@@ -157,6 +414,7 @@ def download_preset_snapshot(
     tqdm_class: type | None = None,
     *,
     verbose: bool = False,
+    on_status: Callable[[str], None] | None = None,
 ) -> Path:
     if preset_key not in HF_MODEL_PRESETS:
         raise ValueError(f"Unknown preset: {preset_key!r}")
@@ -176,6 +434,7 @@ def download_preset_snapshot(
         tqdm_class,
         verbose=verbose,
         preset_key_for_log=preset_key,
+        on_status=on_status,
     )
 
 

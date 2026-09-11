@@ -8,7 +8,7 @@ from pathlib import Path
 from huggingface_hub.errors import GatedRepoError
 
 from backend.hf.registry import HF_MODEL_PRESETS, preset_summary_lines, resolve_preset_dir
-from utils.device.env_bootstrap import DOTENV_LOAD_PATH, load_mithril_dotenv
+from utils.device.env_bootstrap import DOTENV_LOAD_PATH, load_orodruin_dotenv
 from utils.download.hf import (
     configure_hub_verbose,
     download_preset_snapshot,
@@ -20,7 +20,7 @@ _DEBUG_DEFAULT_PRESET = "llama2_7b_chat"
 
 
 def main() -> None:
-    load_mithril_dotenv()
+    load_orodruin_dotenv()
     preset_keys = sorted(HF_MODEL_PRESETS.keys())
     parser = argparse.ArgumentParser(
         description="Download Hugging Face model snapshots via preset name or explicit repo id.",
@@ -55,7 +55,7 @@ def main() -> None:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Log to stderr, enable Hub progress bars, and print mithril status lines.",
+        help="Log to stderr, enable Hub progress bars, and print orodruin status lines.",
     )
     args = parser.parse_args()
 
@@ -85,23 +85,23 @@ def main() -> None:
 
 
 def main_debug() -> None:
-    load_mithril_dotenv()
+    load_orodruin_dotenv()
     preset_keys = sorted(HF_MODEL_PRESETS.keys())
-    default_key = os.environ.get("MITHRIL_DEBUG_PRESET", _DEBUG_DEFAULT_PRESET).strip()
+    default_key = os.environ.get("ORODRUIN_DEBUG_PRESET", _DEBUG_DEFAULT_PRESET).strip()
     if default_key not in HF_MODEL_PRESETS:
         default_key = _DEBUG_DEFAULT_PRESET
     parser = argparse.ArgumentParser(
         description=(
             "Verbose terminal-only Hub pull for debugging: tqdm + INFO logs on stderr. "
             "Default preset is llama2_7b_chat (same local_dir layout as the registry preset). "
-            "Override with --preset or MITHRIL_DEBUG_PRESET."
+            "Override with --preset or ORODRUIN_DEBUG_PRESET."
         ),
     )
     parser.add_argument(
         "--preset",
         choices=preset_keys,
         default=default_key,
-        help="Registry preset (default: %(default)s or MITHRIL_DEBUG_PRESET env).",
+        help="Registry preset (default: %(default)s or ORODRUIN_DEBUG_PRESET env).",
     )
     parser.add_argument(
         "--list-presets",
@@ -117,26 +117,26 @@ def main_debug() -> None:
     configure_hub_verbose()
     preset = HF_MODEL_PRESETS[args.preset]
     tok = os.environ.get("HF_TOKEN", "").strip()
-    print(f"mithril-debug: cwd={Path.cwd()}", file=sys.stderr, flush=True)
+    print(f"orodruin-debug: cwd={Path.cwd()}", file=sys.stderr, flush=True)
     print(
-        f"mithril-debug: dotenv={DOTENV_LOAD_PATH!s} HF_TOKEN={'set' if tok else 'unset'}",
+        f"orodruin-debug: dotenv={DOTENV_LOAD_PATH!s} HF_TOKEN={'set' if tok else 'unset'}",
         file=sys.stderr,
         flush=True,
     )
     print(
-        f"mithril-debug: preset={args.preset!r} repo_id={preset.repo_id!r}",
+        f"orodruin-debug: preset={args.preset!r} repo_id={preset.repo_id!r}",
         file=sys.stderr,
         flush=True,
     )
-    print(f"mithril-debug: local_dir={resolve_preset_dir(args.preset)}", file=sys.stderr, flush=True)
+    print(f"orodruin-debug: local_dir={resolve_preset_dir(args.preset)}", file=sys.stderr, flush=True)
     if "llama" in args.preset.lower():
         print(
-            "mithril-debug: Llama repos are gated. Set HF_TOKEN or run `huggingface-cli login`,",
+            "orodruin-debug: Llama repos are gated. Set HF_TOKEN or run `huggingface-cli login`,",
             file=sys.stderr,
             flush=True,
         )
         print(
-            "mithril-debug: and open the model card on the Hub to accept the license for your account.",
+            "orodruin-debug: and open the model card on the Hub to accept the license for your account.",
             file=sys.stderr,
             flush=True,
         )
@@ -145,7 +145,7 @@ def main_debug() -> None:
     except GatedRepoError as e:
         gated = getattr(e, "repo_id", preset.repo_id)
         print(
-            f"mithril-debug: gated repo {gated!r} — access denied for this token/account.",
+            f"orodruin-debug: gated repo {gated!r} — access denied for this token/account.",
             file=sys.stderr,
             flush=True,
         )

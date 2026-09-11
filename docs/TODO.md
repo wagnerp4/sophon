@@ -1,5 +1,53 @@
 # TODO
-
-Tracking gaps that matter for benchmarking and reproducibility.
-
-1. **Hellaswag harness-style scoring** — Add an evaluation path aligned with [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness) Hellaswag: rank the four `endings` by conditional log-likelihood (LM head), report `acc` / `acc_norm` (and document split + preprocessing parity). Keep the existing generative letter task as an optional variant so numbers are comparable to papers and harness leaderboards.
+- Harness
+    - Name: Mithril
+- Skills
+    - Name: Lembas
+- Agents = Model + Harness
+    - ResearchAgent
+- Models
+- Loop = Agents + Schedule + Context + State Control
+- Panes
+    - Dashboard
+    - Chat
+        - Skills
+        - Memory
+            - Self-evolving memory
+        - RAG
+            - LEANN
+            - ...
+        - Storage
+            - aws / u2
+            - db
+            - local with structure
+            - obsidian vault
+        - Input
+            - Voice
+                - TTS
+                - SST
+                    - SSI
+            - DragAndDrop
+            - Vision
+    - Editor
+        - Support more file extensions
+        - Auto-Completion
+            - DONE: Basic 2-char prefix
+            - TODO: Smart integration
+                - Also with personal structural rules for large
+                code replacement strategies.
+                - What do the big editor companies use for this?
+        - Panes:
+            - Lower horizontal collapsible pane
+                - Small Chat pane
+                - Terminal pane
+                - Bug Report pane
+                - Log pane
+    - Workspace
+        - Agent Control
+        - Orchestration
+        - Workflows
+        - Initialization
+        - Training
+        - Download Utility
+            - Datasets
+        - Cloud and Server Control

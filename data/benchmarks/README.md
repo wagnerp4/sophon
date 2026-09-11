@@ -1,14 +1,14 @@
 # benchmarks
 
-Task manifests for `mithril-benchmark`. Each YAML file describes one benchmark: where the rows live, how to render a prompt, and how to score the model output.
+Task manifests for `orodruin-benchmark`. Each YAML file describes one benchmark: where the rows live, how to render a prompt, and how to score the model output.
 
-`mithril-benchmark --task <id>` resolves `<id>` to `<this-folder>/<id>.yaml` and runs the task with the loaded local model.
+`orodruin-benchmark --task <id>` resolves `<id>` to `<this-folder>/<id>.yaml` and runs the task with the loaded local model.
 
 ## Available manifests
 
 | File | Source | Notes |
 | --- | --- | --- |
-| `hellaswag.yaml` | `data/hellaswag/data/*.jsonl` (in repo) | Split-aware loader under `mithril.eval.datasets.hellaswag`. Default split `val`. Public `test` JSONL has no labels and is rejected for scored runs. |
+| `hellaswag.yaml` | `data/hellaswag/data/*.jsonl` (in repo) | Split-aware loader under `orodruin.eval.datasets.hellaswag`. Default split `val`. Public `test` JSONL has no labels and is rejected for scored runs. |
 | `mmlu.yaml` | `data/test/data/{dev,test}/*.csv` (NOT in repo) | Hendrycks MMLU. Download `data.tar` from the [MMLU repo README](../test/README.md) and extract into `data/test/data/` first. |
 
 ## Manifest schema
@@ -75,10 +75,10 @@ Paths under `source` resolve relative to the manifest file unless absolute.
 
 ## Experiment artifacts
 
-Runs write under `<repo>/data/exps/` by default (`MITHRIL_BENCH_OUT_DIR` overrides). Each invocation creates `<out>/<run_id>/experiment_summary.json` plus `<out>/<run_id>/<task_id>/predictions.jsonl` and `summary.json`. See `mithril/docs/README.md` for `run_id` composition and CLI flags.
+Runs write under `<repo>/data/exps/` by default (`ORODRUIN_BENCH_OUT_DIR` overrides). Each invocation creates `<out>/<run_id>/experiment_summary.json` plus `<out>/<run_id>/<task_id>/predictions.jsonl` and `summary.json`. See `orodruin/docs/README.md` for `run_id` composition and CLI flags.
 
 ## Adding a new task
 
 1. Drop the data file under `data/<task>/...` (JSONL preferred).
 2. Add `data/benchmarks/<task>.yaml` referencing it.
-3. Run `uv run mithril-benchmark --task <task> --limit 5` to sanity-check.
+3. Run `uv run orodruin-benchmark --task <task> --limit 5` to sanity-check.

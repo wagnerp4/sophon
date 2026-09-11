@@ -54,18 +54,4 @@ def infer_default_quantization() -> str:
         resolved = resolve_quantization_choice(raw)
         if resolved in ("none", "4bit", "8bit"):
             return resolved
-    try:
-        import torch
-
-        mps_backend = getattr(torch.backends, "mps", None)
-        if (
-            mps_backend is not None
-            and mps_backend.is_available()
-            and mps_backend.is_built()
-        ):
-            return "none"
-        if torch.cuda.is_available():
-            return "4bit"
-    except Exception:
-        pass
     return "none"

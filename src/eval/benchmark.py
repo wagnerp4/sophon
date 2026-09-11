@@ -8,7 +8,7 @@ _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent mithril.* imports end-to-end.
+# Todo: remove this path bootstrap after the package uses consistent orodruin.* imports end-to-end.
 
 import argparse
 import hashlib
@@ -31,22 +31,22 @@ from eval.experiment_id import (
 )
 from eval.runner import RunConfig, TaskResult, run_task
 from eval.task_spec import BenchmarkTask, find_task, list_task_ids, load_task
-from utils.device.env_bootstrap import load_mithril_dotenv, mithril_project_root
+from utils.device.env_bootstrap import load_orodruin_dotenv, orodruin_project_root
 from backend.hf.registry import preset_keys_sorted, resolve_preset_dir
 
 
 def _default_data_dir() -> Path:
-    env = os.environ.get("MITHRIL_BENCH_DATA_DIR", "").strip()
+    env = os.environ.get("ORODRUIN_BENCH_DATA_DIR", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return (mithril_project_root() / "data" / "benchmarks").resolve()
+    return (orodruin_project_root() / "data" / "benchmarks").resolve()
 
 
 def _default_out_dir() -> Path:
-    env = os.environ.get("MITHRIL_BENCH_OUT_DIR", "").strip()
+    env = os.environ.get("ORODRUIN_BENCH_OUT_DIR", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return (mithril_project_root() / "data" / "exps").resolve()
+    return (orodruin_project_root() / "data" / "exps").resolve()
 
 
 def _parse_task_ids(arg: str | None, data_dir: Path) -> list[str]:
@@ -83,7 +83,7 @@ def _print_summary_table(results: list[TaskResult]) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mithril-benchmark",
+        prog="orodruin-benchmark",
         description="Evaluate a local LLM on reasoning benchmarks defined in data/benchmarks.",
     )
     parser.add_argument(
@@ -94,7 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         default=None,
-        help="Folder with benchmark YAMLs (default: <repo>/data/benchmarks or MITHRIL_BENCH_DATA_DIR).",
+        help="Folder with benchmark YAMLs (default: <repo>/data/benchmarks or ORODRUIN_BENCH_DATA_DIR).",
     )
     parser.add_argument(
         "--list",
@@ -105,8 +105,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=("hf", "ollama"),
-        default=os.environ.get("MITHRIL_BENCH_BACKEND", "hf"),
-        help="Inference backend (default: hf; override with MITHRIL_BENCH_BACKEND).",
+        default=os.environ.get("ORODRUIN_BENCH_BACKEND", "hf"),
+        help="Inference backend (default: hf; override with ORODRUIN_BENCH_BACKEND).",
     )
 
     preset_choices = preset_keys_sorted()
@@ -120,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=preset_choices,
         default=None,
-        help="HF backend: registry key; loads <repo>/models/<Hub-dash-id> (like mithril-hf-download). Mutually exclusive with --model.",
+        help="HF backend: registry key; loads <repo>/models/<Hub-dash-id> (like orodruin-hf-download). Mutually exclusive with --model.",
     )
     parser.add_argument(
         "--quantization",
@@ -144,7 +144,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--ollama-model",
-        default=os.environ.get("MITHRIL_BENCH_OLLAMA_MODEL"),
+        default=os.environ.get("ORODRUIN_BENCH_OLLAMA_MODEL"),
         help="Ollama backend: model name visible to the local daemon.",
     )
     parser.add_argument(
@@ -173,7 +173,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out-dir",
         default=None,
-        help="Experiment root folder (default: <repo>/data/exps or MITHRIL_BENCH_OUT_DIR).",
+        help="Experiment root folder (default: <repo>/data/exps or ORODRUIN_BENCH_OUT_DIR).",
     )
     parser.add_argument(
         "--run-id",
@@ -189,7 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    load_mithril_dotenv()
+    load_orodruin_dotenv()
     args = _build_parser().parse_args()
 
     data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir else _default_data_dir()
@@ -209,7 +209,7 @@ def main() -> None:
         task_ids = _parse_task_ids(args.task, data_dir)
         tasks = _load_tasks(task_ids, data_dir)
     except (FileNotFoundError, ValueError) as exc:
-        print(f"mithril-benchmark: {exc}", file=sys.stderr)
+        print(f"orodruin-benchmark: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
     enable_thinking = args.thinking
@@ -219,19 +219,19 @@ def main() -> None:
     backend = args.backend
     if args.preset is not None and backend != "hf":
         print(
-            "mithril-benchmark: --preset applies only with --backend hf.",
+            "orodruin-benchmark: --preset applies only with --backend hf.",
             file=sys.stderr,
         )
         raise SystemExit(2)
 
-    root = mithril_project_root()
+    root = orodruin_project_root()
     effective_hf_model = args.model
     if args.preset is not None:
         effective_hf_model = str(resolve_preset_dir(args.preset, root))
 
     if backend == "ollama" and not args.ollama_model:
         print(
-            "mithril-benchmark: --backend ollama requires --ollama-model (or MITHRIL_BENCH_OLLAMA_MODEL).",
+            "orodruin-benchmark: --backend ollama requires --ollama-model (or ORODRUIN_BENCH_OLLAMA_MODEL).",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -273,10 +273,10 @@ def main() -> None:
     exp_root = (out_dir / run_id).resolve()
     exp_root.mkdir(parents=True, exist_ok=True)
     fp_payload = fingerprint_payload(parts)
-    print(f"mithril-benchmark: run_id={run_id}", file=sys.stderr)
-    print(f"mithril-benchmark: experiment_dir={exp_root}", file=sys.stderr)
+    print(f"orodruin-benchmark: run_id={run_id}", file=sys.stderr)
+    print(f"orodruin-benchmark: experiment_dir={exp_root}", file=sys.stderr)
     if resolved_model_display:
-        print(f"mithril-benchmark: model_path={resolved_model_display}", file=sys.stderr)
+        print(f"orodruin-benchmark: model_path={resolved_model_display}", file=sys.stderr)
 
     results: list[TaskResult] = []
     for task in tasks:
@@ -306,7 +306,7 @@ def main() -> None:
         try:
             results.append(run_task(task, config))
         except (FileNotFoundError, ValueError) as exc:
-            print(f"mithril-benchmark: task {task.id} skipped: {exc}", file=sys.stderr)
+            print(f"orodruin-benchmark: task {task.id} skipped: {exc}", file=sys.stderr)
 
     manifest = {
         "run_id": run_id,
@@ -333,7 +333,7 @@ def main() -> None:
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"mithril-benchmark: wrote {summary_manifest_path}", file=sys.stderr)
+    print(f"orodruin-benchmark: wrote {summary_manifest_path}", file=sys.stderr)
 
     _print_summary_table(results)
 
