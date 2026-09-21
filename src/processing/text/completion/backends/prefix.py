@@ -22,7 +22,7 @@ _DEFAULT_SKIP_DIRS = frozenset(
         ".ruff_cache",
         "dist",
         "build",
-        "orodruin.egg-info",
+        "sophon.egg-info",
         ".tox",
     }
 )

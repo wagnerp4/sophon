@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "orodruin"
+name = "sophon"
 version = "0.1.0"
 description = "Utilities around Gemma 4 Hub weights (uv-managed)."
 requires-python = ">=3.10"
@@ -23,21 +23,24 @@ dependencies = [
 ]
 
 [project.scripts]
-orodruin-cli = "orodruin.cli.terminal:main"
-orodruin-infer = "orodruin.cli.inference:main"
-orodruin-chat-cli = "orodruin.cli.chat:main"
-orodruin-chat-tui = "orodruin.cli.backends.textual:main"
-orodruin-download-hf = "orodruin.utils.download.cli_snapshot:main"
-orodruin-download-hf-debug = "orodruin.utils.download.cli_snapshot:main_debug"
-orodruin-hf-download = "orodruin.utils.download.cli_hf_subprocess:main"
-orodruin-system-check = "orodruin.utils.device.system_check:main"
-orodruin-benchmark = "orodruin.eval.benchmark:main"
-orodruin-sync-shims = "orodruin.utils.device.platform:sync_shims_main"
-orodruin-finetune = "orodruin.training.finetune.cli:main"
+sophon-cli = "sophon.cli.terminal:main"
+sophon-infer = "sophon.cli.inference:main"
+sophon-chat-cli = "sophon.cli.chat:main"
+sophon-chat-tui = "sophon.cli.backends.textual:main"
+sophon-download-hf = "sophon.utils.download.cli_snapshot:main"
+sophon-download-hf-debug = "sophon.utils.download.cli_snapshot:main_debug"
+sophon-hf-download = "sophon.utils.download.cli_hf_subprocess:main"
+sophon-system-check = "sophon.utils.device.system_check:main"
+sophon-benchmark = "sophon.eval.benchmark:main"
+sophon-rag-index = "sophon.cli.rag_index:main"
+sophon-sync-shims = "sophon.utils.device.platform:sync_shims_main"
+sophon-finetune = "sophon.training.finetune.cli:main"
 
 [project.optional-dependencies]
 rag = []
 rag-leann = ["leann>=0.3.7"]
+rag-lightrag = ["lightrag-hku>=1.4.0"]
+rag-full = ["leann>=0.3.7", "lightrag-hku>=1.4.0"]
 tts = [
     "qwen-tts",
     "soundfile",
@@ -52,51 +55,68 @@ sst = [
     "soundfile",
     "sounddevice",
 ]
-tui = ["textual[syntax]>=0.80.0", "textual-plot>=0.10.0", "nvidia-ml-py>=12.0.0", "psutil>=5.9.0", "pymupdf>=1.24.0"]
+tui = [
+    "textual[syntax]>=0.80.0",
+    "textual-plot>=0.10.0",
+    "nvidia-ml-py>=12.0.0",
+    "psutil>=5.9.0",
+    "pymupdf>=1.24.0",
+    "textual-image[textual,numpy]>=0.8.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+]
 finetune = ["datasets>=3.0.0", "peft>=0.14.0", "trl>=0.15.0"]
 finetune-unsloth = ["unsloth"]
 
 [tool.setuptools]
-package-dir = {"orodruin" = "src"}
+package-dir = {"sophon" = "src"}
 packages = [
-    "orodruin",
-    "orodruin.backend",
-    "orodruin.backend.hf",
-    "orodruin.backend.ollama",
-    "orodruin.backend.lmstudio",
-    "orodruin.cli",
-    "orodruin.cli.backends",
-    "orodruin.cli.flags",
-    "orodruin.cli.host",
-    "orodruin.cli.tui",
-    "orodruin.cli.tui.screens",
-    "orodruin.cli.tui.tiles",
-    "orodruin.eval",
-    "orodruin.eval.datasets",
-    "orodruin.eval.datasets.hellaswag",
-    "orodruin.integrations",
-    "orodruin.integrations.obsidian",
-    "orodruin.integrations.shell",
-    "orodruin.processing",
-    "orodruin.processing.audio",
-    "orodruin.processing.audio.speech",
-    "orodruin.processing.audio.speech.backends",
-    "orodruin.processing.text",
-    "orodruin.processing.text.context",
-    "orodruin.processing.text.memory",
-    "orodruin.processing.text.completion",
-    "orodruin.processing.text.completion.backends",
-    "orodruin.processing.text.retrieval",
-    "orodruin.processing.text.retrieval.backends",
-    "orodruin.utils",
-    "orodruin.utils.device",
-    "orodruin.utils.download",
-    "orodruin.training",
-    "orodruin.training.common",
-    "orodruin.training.finetune",
-    "orodruin.training.finetune.datasets",
-    "orodruin.training.finetune.backends",
-    "orodruin.training.pretraining",
+    "sophon",
+    "sophon.backend",
+    "sophon.backend.hf",
+    "sophon.backend.ollama",
+    "sophon.backend.lmstudio",
+    "sophon.cli",
+    "sophon.cli.backends",
+    "sophon.cli.flags",
+    "sophon.cli.host",
+    "sophon.cli.tui",
+    "sophon.cli.tui.screens",
+    "sophon.cli.tui.tiles",
+    "sophon.eval",
+    "sophon.eval.datasets",
+    "sophon.eval.datasets.hellaswag",
+    "sophon.integrations",
+    "sophon.integrations.obsidian",
+    "sophon.integrations.zotero",
+    "sophon.integrations.shell",
+    "sophon.integrations.google",
+    "sophon.integrations.overleaf",
+    "sophon.processing",
+    "sophon.processing.audio",
+    "sophon.processing.audio.speech",
+    "sophon.processing.audio.speech.backends",
+    "sophon.processing.text",
+    "sophon.processing.text.context",
+    "sophon.processing.text.memory",
+    "sophon.processing.text.completion",
+    "sophon.processing.text.completion.backends",
+    "sophon.processing.text.retrieval",
+    "sophon.processing.text.retrieval.backends",
+    "sophon.processing.text.retrieval.corpus",
+    "sophon.cli.tui.widgets",
+    "sophon.harness",
+    "sophon.harness.subagent",
+    "sophon.utils",
+    "sophon.utils.device",
+    "sophon.utils.download",
+    "sophon.training",
+    "sophon.training.common",
+    "sophon.training.finetune",
+    "sophon.training.finetune.datasets",
+    "sophon.training.finetune.backends",
+    "sophon.training.pretraining",
 ]
 
 [[tool.uv.index]]

@@ -1,0 +1,8 @@
+{"question": "What is Sophon?", "gold": "local Hugging Face"}
+{"question": "Which retrieval index backend does Sophon Chat RAG use by default?", "gold": "LEANN"}
+{"question": "What does Adaptive-RAG decide before retrieve?", "gold": "skip"}
+{"question": "What structure backend can multi-hop queries use?", "gold": "LightRAG"}
+{"question": "Where does sophon-benchmark write experiment artifacts by default?", "gold": "data/exps"}
+{"question": "What slash command shows retrieval backend status in chat?", "gold": "rag-status"}
+{"question": "How do you rebuild the default vault and project corpus index?", "gold": "rag-index"}
+{"question": "What env var sets the Obsidian vault filesystem path for corpus indexing?", "gold": "SOPHON_VAULT_PATH"}

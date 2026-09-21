@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -7,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from .protocols import MemoryStore
+from .tiers import MemoryEntry
 from .types import MemoryScope, StoredTurn
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = (
     """
@@ -40,7 +42,37 @@ _SCHEMA_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, rowid);",
     "CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, rowid);",
+    """
+    CREATE TABLE IF NOT EXISTS episodes (
+        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        user_id TEXT,
+        summary TEXT NOT NULL,
+        turn_count INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_episodes_user ON episodes(user_id, created_at);",
+    """
+    CREATE TABLE IF NOT EXISTS facts_index (
+        fact_id TEXT PRIMARY KEY,
+        tier TEXT NOT NULL,
+        text_hash TEXT NOT NULL,
+        text TEXT NOT NULL,
+        confidence TEXT,
+        source TEXT,
+        user_id TEXT,
+        created_at REAL NOT NULL,
+        revoked_at REAL
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_facts_hash ON facts_index(text_hash);",
 )
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()
 
 
 class SqliteMemoryStore(MemoryStore):
@@ -63,7 +95,8 @@ class SqliteMemoryStore(MemoryStore):
             for stmt in _SCHEMA_SQL:
                 cur.execute(stmt)
             cur.execute(
-                "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?);",
+                "INSERT INTO schema_meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
         finally:
@@ -155,6 +188,131 @@ class SqliteMemoryStore(MemoryStore):
         finally:
             cur.close()
         return removed
+
+    def add_episode(self, scope: MemoryScope, summary: str, turn_count: int) -> None:
+        text = str(summary or "").strip()
+        if not text:
+            return
+        now = time.time()
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO episodes(session_id, user_id, summary, turn_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?);",
+                (scope.session_id, scope.user_id, text, int(turn_count), now),
+            )
+        finally:
+            cur.close()
+
+    def load_recent_episodes(self, scope: MemoryScope, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        cur = self._conn.cursor()
+        try:
+            if scope.user_id:
+                cur.execute(
+                    "SELECT rowid, session_id, user_id, summary, turn_count, created_at "
+                    "FROM episodes WHERE user_id = ? OR session_id = ? "
+                    "ORDER BY created_at DESC LIMIT ?;",
+                    (scope.user_id, scope.session_id, int(limit)),
+                )
+            else:
+                cur.execute(
+                    "SELECT rowid, session_id, user_id, summary, turn_count, created_at "
+                    "FROM episodes ORDER BY created_at DESC LIMIT ?;",
+                    (int(limit),),
+                )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+        episodes: list[dict[str, Any]] = []
+        for rowid, session_id, user_id, summary, turn_count, created_at in rows:
+            episodes.append(
+                {
+                    "rowid": int(rowid),
+                    "session_id": str(session_id),
+                    "user_id": user_id,
+                    "summary": str(summary),
+                    "turn_count": int(turn_count),
+                    "created_at": float(created_at),
+                }
+            )
+        return episodes
+
+    def search_episodes(self, query: str, limit: int) -> list[dict[str, Any]]:
+        needle = str(query or "").strip()
+        if not needle or limit <= 0:
+            return []
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "SELECT rowid, session_id, user_id, summary, turn_count, created_at "
+                "FROM episodes WHERE summary LIKE ? ORDER BY created_at DESC LIMIT ?;",
+                (f"%{needle}%", int(limit)),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+        return [
+            {
+                "rowid": int(rowid),
+                "session_id": str(session_id),
+                "user_id": user_id,
+                "summary": str(summary),
+                "turn_count": int(turn_count),
+                "created_at": float(created_at),
+            }
+            for rowid, session_id, user_id, summary, turn_count, created_at in rows
+        ]
+
+    def upsert_fact(self, entry: MemoryEntry) -> None:
+        entry.with_id()
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO facts_index(fact_id, tier, text_hash, text, confidence, source, user_id, created_at, revoked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(fact_id) DO UPDATE SET "
+                "tier=excluded.tier, text_hash=excluded.text_hash, text=excluded.text, "
+                "confidence=excluded.confidence, source=excluded.source, revoked_at=excluded.revoked_at;",
+                (
+                    entry.id,
+                    entry.tier,
+                    _text_hash(entry.text),
+                    entry.text,
+                    entry.confidence,
+                    entry.source,
+                    entry.user_id,
+                    entry.created_at or time.time(),
+                    entry.revoked_at,
+                ),
+            )
+        finally:
+            cur.close()
+
+    def revoke_fact(self, fact_id: str) -> bool:
+        now = time.time()
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE facts_index SET revoked_at = ? WHERE fact_id = ? AND revoked_at IS NULL;",
+                (now, fact_id),
+            )
+            changed = int(cur.rowcount or 0)
+        finally:
+            cur.close()
+        return changed > 0
+
+    def fact_hash_active(self, text: str) -> bool:
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "SELECT 1 FROM facts_index WHERE text_hash = ? AND revoked_at IS NULL LIMIT 1;",
+                (_text_hash(text),),
+            )
+            return cur.fetchone() is not None
+        finally:
+            cur.close()
 
     def close(self) -> None:
         try:

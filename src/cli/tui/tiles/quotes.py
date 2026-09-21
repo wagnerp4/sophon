@@ -13,7 +13,7 @@ from cli.tui.tiles.yahoo import fetch_yahoo_many
 
 
 def _symbols() -> list[str]:
-    raw = os.environ.get("ORODRUIN_QUOTES_SYMBOLS", "AAPL,MSFT,NVDA").strip()
+    raw = os.environ.get("SOPHON_QUOTES_SYMBOLS", "AAPL,MSFT,NVDA").strip()
     parts = [part.strip().upper() for part in raw.split(",") if part.strip()]
     return parts or ["AAPL", "MSFT", "NVDA"]
 
@@ -70,9 +70,9 @@ def _format_rows(title: str, rows: list[dict[str, Any]], errors: list[str], prov
 
 
 def _fetch_quotes() -> TileState:
-    provider = os.environ.get("ORODRUIN_QUOTES_PROVIDER", "yahoo").strip().lower() or "yahoo"
+    provider = os.environ.get("SOPHON_QUOTES_PROVIDER", "yahoo").strip().lower() or "yahoo"
     if provider not in ("yahoo", "stooq"):
-        raise ValueError(f"unsupported ORODRUIN_QUOTES_PROVIDER={provider!r} (use yahoo or stooq)")
+        raise ValueError(f"unsupported SOPHON_QUOTES_PROVIDER={provider!r} (use yahoo or stooq)")
     symbols = _symbols()
     if provider == "yahoo":
         rows, errors = fetch_yahoo_many(symbols)

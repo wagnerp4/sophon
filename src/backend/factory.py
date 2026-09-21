@@ -4,9 +4,16 @@ from typing import Literal
 
 from backend.chat_resolve import ChatBackendId, chat_backend_ids
 
-BackendId = Literal["hf", "ollama", "lmstudio"]
+BackendId = Literal["hf", "ollama", "lmstudio", "openai", "anthropic", "google"]
 
-_BACKEND_IDS: tuple[BackendId, ...] = ("hf", "ollama", "lmstudio")
+_BACKEND_IDS: tuple[BackendId, ...] = (
+    "hf",
+    "ollama",
+    "lmstudio",
+    "openai",
+    "anthropic",
+    "google",
+)
 
 
 def backend_ids() -> tuple[BackendId, ...]:
@@ -24,6 +31,18 @@ def load_backend(backend_id: BackendId):
         return backend
     if backend_id == "lmstudio":
         from backend.lmstudio import backend
+
+        return backend
+    if backend_id == "openai":
+        from backend.openai import backend
+
+        return backend
+    if backend_id == "anthropic":
+        from backend.anthropic import backend
+
+        return backend
+    if backend_id == "google":
+        from backend.google import backend
 
         return backend
     raise KeyError(f"unknown backend {backend_id!r}")

@@ -1,48 +1,103 @@
 # TODO
+
+Product constraints and intended architecture: [VISION.md](VISION.md), [direction/](direction/README.md). This file is the item backlog only.
+
 - Harness
-    - Name: Mithril
+    - Name: sophon
+    - DONE: policy yaml, allow-list, 1/2/3 prompt for shell_exec and out-of-workspace writes
+    - TODO: OS sandbox, net allowlist, ResearchAgent clone, plan-mode schema filter
 - Skills
     - Name: Lembas
 - Agents = Model + Harness
     - ResearchAgent
+- Subagents (see direction/subagents.md)
+    - DONE: one-shot spawn + fork, inherit resident/API parent, maxDepth=1, maxActive=1
+    - DONE: plan/chat omit spawn tools. `/subagents` last run. `research` is read-only
+    - TODO: TaskDescriptor + PlacementDecision over /setup combos (3090 leftover VRAM)
+    - TODO: `.sophon/agents` catalog (code / eval / classify). research is an agent_type, not a catalog file yet
+    - TODO: settlement notice, list/interrupt, continuable + send_message
+    - TODO: leftover-VRAM 2B/4B classify and JEV Choice. Deferred while inherit is the only legal combo
+    - TODO: worktrees for parallel code
+    - Not this plan: loop engineering, unlimited tool-loop policy, swarm / STATE.md overlay
 - Models
+    - More Model Options: DeepSeek API for Flash 4.1
 - Loop = Agents + Schedule + Context + State Control
 - Panes
     - Dashboard
     - Chat
+        - Prompts
+            - System Prompt
+        - Modes:
+            - Plan
+            - Chat
+            - Agent
         - Skills
+            - Self-evolving skills
         - Memory
-            - Self-evolving memory
+            - self-evolving memory
+        - Feedback Loop
+            - flag errors in reasoning
+            - upvote/downvote past conversation turns
+        - Tools
+            - Connectors to:
+                - GMAIL
         - RAG
-            - LEANN
-            - ...
-        - Storage
-            - aws / u2
-            - db
+            - LEANN (index) — default corpus: vault (`SOPHON_VAULT_PATH`) + project → `data/rag/indexes/default`
+            - LightRAG (structure)
+            - Adaptive-RAG (retrieve or skip)
+            - Build: `sophon-rag-index` / `/rag-index`
+        - Eval (in Chat)
+            - `/eval model` (MMLU / Hellaswag)
+            - `/eval rag` (ablation vs default index)
+            - `/eval train` (stub: list run dirs)
+        - Storage (we want to support)
+            - AWS / B2
+            - DB
             - local with structure
-            - obsidian vault
+            - obsidian vault (also default RAG corpus source)
         - Input
             - Voice
-                - TTS
-                - SST
-                    - SSI
+                - SSI
             - DragAndDrop
             - Vision
+        - Reasoning
+            - whip button for faster reasoning
+            - better chat feedback for each reasoning / tool / planning step
+            - finetune on past conversation to see error patterns in similar task context (how?)
+        - MCP
+            - Obsidian MCP
+            - Zotero MCP
+            - DONE: chat zotero_* tools (tree / search / list / read / metrics)
+            - DONE: chat overleaf_* tools (list projects / list / read / sections)
+            - TODO: Crossref live citation counts, semantic search
+            - TODO: overleaf write / update_section / compile
     - Editor
-        - Support more file extensions
+        - Explorer trees
+            - DONE: project / vault (`Ctrl+Shift+T`, `SOPHON_VAULT_PATH`)
+            - DONE: zotero collections (`SOPHON_ZOTERO_API_URL` / sqlite)
+            - DONE: overleaf Git projects (`SOPHON_OVERLEAF_*`, list/read)
+            - TODO: overleaf write / commit / push + compile
+            - TODO: tags, graph, recent notes
+        - Support more (all) file extensions
+            - DONE: .pdf (page text default, optional current-page raster)
+            - DONE: png/jpg/webp/gif/bmp preview
+            - DONE: .tex / .bib / .sty / .cls open in editor (Overleaf tree read-only)
+            - .tex->.pdf rendering
+        - Support more programming languages
+            - Rust
+            - C,C#,C++
+            - JavaScript,TypeScript
+            - Java
+            - Go
+            - Python
+            - Shell, Bash, PowerShell, ...
         - Auto-Completion
             - DONE: Basic 2-char prefix
             - TODO: Smart integration
                 - Also with personal structural rules for large
                 code replacement strategies.
                 - What do the big editor companies use for this?
-        - Panes:
-            - Lower horizontal collapsible pane
-                - Small Chat pane
-                - Terminal pane
-                - Bug Report pane
-                - Log pane
-    - Workspace
+    - Workspace (removed as Workshop pane; use Chat + Editor)
         - Agent Control
         - Orchestration
         - Workflows
@@ -51,3 +106,10 @@
         - Download Utility
             - Datasets
         - Cloud and Server Control
+
+Open TODOS:
+    - Web-site builder skill/command (like lovable)
+
+
+
+

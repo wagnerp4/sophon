@@ -31,6 +31,7 @@ class FinetuneBackend(Protocol):
         recipe: FinetuneRecipe,
         *,
         on_log: LogCallback | None = None,
+        adapter_path: Path | None = None,
     ) -> PreparedModel: ...
 
     def train(
@@ -40,6 +41,7 @@ class FinetuneBackend(Protocol):
         recipe: FinetuneRecipe,
         output_dir: Path,
         *,
+        eval_dataset: object | None = None,
         on_progress: ProgressCallback | None = None,
         on_log: LogCallback | None = None,
     ) -> TrainResult: ...

@@ -11,6 +11,18 @@ _LeanSearcher: Any = None
 _LeanSearchImportError: Exception | None = None
 
 
+def leann_searcher_available() -> bool:
+    if _LeanSearcher is not None:
+        return True
+    if _LeanSearchImportError is not None:
+        return False
+    try:
+        _load_leann_searcher_cls()
+    except ImportError:
+        return False
+    return True
+
+
 def _load_leann_searcher_cls() -> Any:
     global _LeanSearcher, _LeanSearchImportError
     if _LeanSearcher is not None:
@@ -21,8 +33,8 @@ def _load_leann_searcher_cls() -> Any:
         from leann import LeannSearcher as LS
     except ImportError as exc:
         err = ImportError(
-            "LEANN native retriever requires the `leann` distribution (extras: orodruin[rag-leann]). "
-            "Install from PyPI or pip install -e from Repos/RAG/LEANN/packages/leann."
+            "leann is not importable in this interpreter. "
+            "Windows TUI .venv has no LEANN wheels. Query uses passages.jsonl BM25 instead."
         )
         _LeanSearchImportError = err
         raise err from exc
@@ -31,7 +43,7 @@ def _load_leann_searcher_cls() -> Any:
 
 
 def read_default_top_k_from_env() -> int:
-    top_k_raw = os.environ.get("ORODRUIN_LEANN_TOP_K", "5").strip()
+    top_k_raw = os.environ.get("SOPHON_LEANN_TOP_K", "5").strip()
     try:
         return int(top_k_raw)
     except ValueError:
@@ -39,8 +51,8 @@ def read_default_top_k_from_env() -> int:
 
 
 def lean_native_retriever_from_env() -> RagRetriever | None:
-    """ORODRUIN_LEANN_INDEX -> basename path passed to LeannSearcher (expects sibling .meta.json)."""
-    raw = os.environ.get("ORODRUIN_LEANN_INDEX", "").strip()
+    """SOPHON_LEANN_INDEX -> basename path passed to LeannSearcher (expects sibling .meta.json)."""
+    raw = os.environ.get("SOPHON_LEANN_INDEX", "").strip()
     if not raw:
         return None
     return LeanNativeRetriever(raw, default_top_k=read_default_top_k_from_env())

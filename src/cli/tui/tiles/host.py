@@ -10,7 +10,7 @@ from textual.widgets import Static
 
 from cli.tui.tiles.base import BaseTile, TileState
 from cli.tui.tiles.hardware import fetch_hardware_state
-from utils.device.env_bootstrap import orodruin_project_root
+from utils.device.env_bootstrap import sophon_project_root
 
 
 def _fmt_bytes(value: object) -> str:
@@ -58,8 +58,8 @@ def format_host_snapshot(app: Any, *, compact: bool = False) -> str:
     if isinstance(win_total, int) and isinstance(win_avail, int):
         ram_line += f"  win={_fmt_bytes(win_avail)} free / {_fmt_bytes(win_total)}"
     model_line = getattr(app, "model_status_text", "unknown")
-    cwd = getattr(app, "cwd", orodruin_project_root())
-    root = orodruin_project_root()
+    cwd = getattr(app, "cwd", sophon_project_root())
+    root = sophon_project_root()
     if compact:
         return (
             f"py={snapshot.get('python')} torch={snapshot.get('torch')}  "
@@ -71,7 +71,11 @@ def format_host_snapshot(app: Any, *, compact: bool = False) -> str:
     load_phase = str(getattr(app, "load_progress_phase", "") or "")
     load_line = f"load: {load_phase or getattr(app, 'load_status', '')}"
     if load_total > 0:
-        load_line += f" ({load_n}/{load_total})"
+        pct = min(100.0, max(0.0, (float(load_n) / float(load_total)) * 100.0))
+        if load_total >= 4097:
+            load_line += f" {pct:.1f}% ({_fmt_bytes(load_n)} / {_fmt_bytes(load_total)})"
+        else:
+            load_line += f" {pct:.1f}% ({load_n}/{load_total})"
     return "\n".join(
         [
             f"python={snapshot.get('python')} torch={snapshot.get('torch')}",

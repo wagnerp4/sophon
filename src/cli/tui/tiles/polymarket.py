@@ -10,7 +10,7 @@ from cli.tui.tiles.base import BaseTile, TileState, http_get_json, wrap_fetch
 
 
 def _limit() -> int:
-    raw = os.environ.get("ORODRUIN_POLYMARKET_LIMIT", "5").strip()
+    raw = os.environ.get("SOPHON_POLYMARKET_LIMIT", "5").strip()
     try:
         return max(1, min(int(raw or "5"), 15))
     except ValueError:
@@ -18,7 +18,7 @@ def _limit() -> int:
 
 
 def _slugs() -> list[str]:
-    raw = os.environ.get("ORODRUIN_POLYMARKET_MARKETS", "").strip()
+    raw = os.environ.get("SOPHON_POLYMARKET_MARKETS", "").strip()
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 

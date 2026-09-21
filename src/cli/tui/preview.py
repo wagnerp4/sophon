@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import math
 import re
 import struct
@@ -11,9 +12,19 @@ import numpy as np
 from PIL import Image
 from rich.text import Text
 from textual import events
+from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Static
+
+from cli.tui.terminal_image import (
+    cell_pixel_size,
+    graphics_enabled,
+    graphics_label,
+    image_widget_class,
+)
 
 _PATH_TOKEN_RE = re.compile(
     r"([MmLlHhVvAaZz])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
@@ -23,10 +34,11 @@ _BG = (18, 20, 24)
 _MESH_BASE = (188, 196, 208)
 _LIGHT = np.array([-0.32, 0.55, 0.77], dtype=np.float64)
 _ORBIT_STEP = 0.14
-# TODO: sixel / textual-image when the host terminal reports graphics protocol support
+_MAX_IMAGE_SIDE = 2048
 # TODO: mesh decimation for large STL files
 # TODO: cubic/quadratic SVG commands (C/S/Q/T)
 # TODO: PDF two-page spread / zoom
+# TODO: notebook cell outputs via the same sixel/kitty image widget
 
 
 @dataclass
@@ -485,13 +497,21 @@ def _arc_points(
     return points
 
 
-class RasterPreview(Static, can_focus=True):
+class RasterPreview(Widget, can_focus=True, can_focus_children=False):
     DEFAULT_CSS = """
     RasterPreview {
         overflow: hidden;
         height: 1fr;
         width: 1fr;
         background: $background;
+    }
+    RasterPreview #raster-static {
+        width: 1fr;
+        height: 1fr;
+    }
+    RasterPreview #raster-image {
+        width: 1fr;
+        height: 1fr;
     }
     """
     BINDINGS = [
@@ -515,17 +535,27 @@ class RasterPreview(Static, can_focus=True):
             super().__init__()
 
     def __init__(self, **kwargs) -> None:
-        super().__init__("", **kwargs)
+        super().__init__(**kwargs)
         self._kind: str | None = None
         self._mesh: Mesh | None = None
         self._svg_text: str | None = None
+        self._image: Image.Image | None = None
         self._pdf_doc = None
         self._pdf_page = 0
+        self._pdf_view = "text"
         self._error: str | None = None
         self._yaw = 0.65
         self._pitch = 0.45
         self._roll = 0.0
         self._drag: tuple[int, int] | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="raster-static")
+        widget_cls = image_widget_class()
+        if widget_cls is not None:
+            image = widget_cls(id="raster-image")
+            image.display = False
+            yield image
 
     @property
     def can_orbit(self) -> bool:
@@ -534,6 +564,10 @@ class RasterPreview(Static, can_focus=True):
     @property
     def can_page(self) -> bool:
         return self._kind == "pdf" and self._pdf_doc is not None
+
+    @property
+    def pdf_view(self) -> str:
+        return self._pdf_view
 
     def _close_pdf(self) -> None:
         doc = self._pdf_doc
@@ -553,16 +587,18 @@ class RasterPreview(Static, can_focus=True):
         self._kind = None
         self._mesh = None
         self._svg_text = None
+        self._image = None
         self._close_pdf()
         self._error = None
         self._drag = None
-        self.update("")
+        self._set_fallback("")
 
     def show_mesh(self, mesh: Mesh, *, reset_orbit: bool = True) -> None:
         self._close_pdf()
         self._kind = "mesh"
         self._mesh = mesh
         self._svg_text = None
+        self._image = None
         self._error = None
         if reset_orbit:
             self._yaw = 0.65
@@ -575,14 +611,32 @@ class RasterPreview(Static, can_focus=True):
         self._kind = "svg"
         self._svg_text = markup
         self._mesh = None
+        self._image = None
         self._error = None
         self._paint()
 
-    def show_pdf(self, data: bytes) -> None:
+    def show_image(self, data: bytes) -> None:
+        self._close_pdf()
+        self._mesh = None
+        self._svg_text = None
+        try:
+            image = Image.open(io.BytesIO(data))
+            image.load()
+            self._image = image.convert("RGB")
+        except Exception as exc:
+            self.show_error(f"Image preview failed: {exc}")
+            return
+        self._kind = "image"
+        self._error = None
+        self._paint()
+
+    def show_pdf(self, data: bytes, *, reset_page: bool = True) -> None:
         from cli.tui.pdf_view import open_pdf
 
         self._mesh = None
         self._svg_text = None
+        self._image = None
+        keep_page = 0 if reset_page else self._pdf_page
         self._close_pdf()
         try:
             self._pdf_doc = open_pdf(data)
@@ -591,17 +645,35 @@ class RasterPreview(Static, can_focus=True):
             return
         self._kind = "pdf"
         self._error = None
-        self._pdf_page = 0
+        last = int(self._pdf_doc.page_count) - 1
+        self._pdf_page = max(0, min(last, keep_page))
         self._paint()
         self._emit_pdf_page()
+
+    def set_pdf_view(self, mode: str) -> None:
+        if mode not in {"text", "raster"}:
+            return
+        if mode == self._pdf_view and self._error is None:
+            return
+        self._pdf_view = mode
+        self._paint()
+        self._emit_pdf_page()
+
+    def page_source_text(self) -> str:
+        from cli.tui.pdf_view import pdf_page_source
+
+        if self._pdf_doc is None:
+            return ""
+        return pdf_page_source(self._pdf_doc, self._pdf_page)
 
     def show_error(self, message: str) -> None:
         self._kind = None
         self._mesh = None
         self._svg_text = None
+        self._image = None
         self._close_pdf()
         self._error = message
-        self.update(message)
+        self._set_fallback(message)
 
     def on_resize(self, event: events.Resize) -> None:
         self._paint()
@@ -618,13 +690,13 @@ class RasterPreview(Static, can_focus=True):
         event.stop()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        if not self.can_page:
+        if not self.can_page or self._pdf_view == "text":
             return
         self._pdf_delta(-1)
         event.stop()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        if not self.can_page:
+        if not self.can_page or self._pdf_view == "text":
             return
         self._pdf_delta(1)
         event.stop()
@@ -726,31 +798,122 @@ class RasterPreview(Static, can_focus=True):
             return
         self.post_message(self.PdfPageChanged(self._pdf_page, int(self._pdf_doc.page_count)))
 
-    def _paint(self) -> None:
-        if self._error:
-            self.update(self._error)
+    def _image_widget(self):
+        try:
+            return self.query_one("#raster-image")
+        except NoMatches:
+            return None
+
+    def _fallback(self) -> Static:
+        return self.query_one("#raster-static", Static)
+
+    def _set_fallback(self, content) -> None:
+        widget = self._image_widget()
+        if widget is not None:
+            widget.image = None
+            widget.display = False
+        static = self._fallback()
+        static.display = True
+        static.update(content)
+        if self._kind == "pdf" and self._pdf_view == "text":
+            self.styles.overflow_y = "auto"
+            static.styles.height = "auto"
+            static.styles.padding = (0, 1)
             return
+        self.styles.overflow_y = "hidden"
+        static.styles.height = "1fr"
+        static.styles.padding = 0
+
+    def _show_graphics(self, image: Image.Image) -> None:
+        widget = self._image_widget()
+        if widget is None:
+            self._set_fallback(image_to_halfblocks(image))
+            return
+        static = self._fallback()
+        static.display = False
+        widget.display = True
+        widget.image = image
+        self.styles.overflow_y = "hidden"
+
+    def _wants_graphics(self) -> bool:
+        if not graphics_enabled():
+            return False
+        if self._kind == "image":
+            return True
+        if self._kind == "svg":
+            return True
+        return self._kind == "pdf" and self._pdf_view == "raster"
+
+    def _target_pixels(self) -> tuple[int, int]:
         size = self.size
         cells_w = max(2, size.width)
         cells_h = max(2, size.height)
-        px_w = cells_w
-        px_h = cells_h * 2
+        if self._wants_graphics():
+            cell_w, cell_h = cell_pixel_size()
+            px_w = min(_MAX_IMAGE_SIDE, cells_w * cell_w)
+            px_h = min(_MAX_IMAGE_SIDE, cells_h * cell_h)
+            return max(2, px_w), max(2, px_h)
+        return cells_w, cells_h * 2
+
+    def _paint(self) -> None:
+        if not self.is_mounted:
+            return
+        if self._error:
+            self._set_fallback(self._error)
+            return
+        px_w, px_h = self._target_pixels()
         try:
             if self._kind == "mesh" and self._mesh is not None:
                 image = render_mesh(self._mesh, px_w, px_h, self._yaw, self._pitch, self._roll)
-            elif self._kind == "svg" and self._svg_text is not None:
+                self._set_fallback(image_to_halfblocks(image))
+                return
+            if self._kind == "svg" and self._svg_text is not None:
                 image = render_svg(self._svg_text, px_w, px_h)
+            elif self._kind == "image" and self._image is not None:
+                image = self._fit_still(self._image, px_w, px_h)
             elif self._kind == "pdf" and self._pdf_doc is not None:
-                from cli.tui.pdf_view import render_pdf_page
+                from cli.tui.pdf_view import pdf_page_body, render_pdf_page
 
+                if self._pdf_view == "text":
+                    self._set_fallback(pdf_page_body(self._pdf_doc, self._pdf_page))
+                    return
                 image = render_pdf_page(self._pdf_doc, self._pdf_page, px_w, px_h)
             else:
-                self.update("")
+                self._set_fallback("")
                 return
         except Exception as exc:
-            self.update(f"Preview failed: {exc}")
+            self._set_fallback(f"Preview failed: {exc}")
             return
-        self.update(image_to_halfblocks(image))
+        if self._wants_graphics():
+            self._show_graphics(image)
+            return
+        self._set_fallback(image_to_halfblocks(image))
+
+    def _fit_still(self, image: Image.Image, width: int, height: int) -> Image.Image:
+        if self._wants_graphics():
+            fitted = image.copy()
+            fitted.thumbnail((_MAX_IMAGE_SIDE, _MAX_IMAGE_SIDE), Image.Resampling.LANCZOS)
+            return fitted
+        fitted = image.copy()
+        fitted.thumbnail((width, height), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (width, height), _BG)
+        x = max(0, (width - fitted.width) // 2)
+        y = max(0, (height - fitted.height) // 2)
+        canvas.paste(fitted, (x, y))
+        return canvas
 
     def repaint(self) -> None:
         self._paint()
+
+    def preview_label(self) -> str:
+        if self._kind == "pdf":
+            if self._pdf_view == "text":
+                return "text"
+            if graphics_enabled():
+                return graphics_label()
+            return "blocks"
+        if self._kind == "image":
+            if graphics_enabled():
+                return graphics_label()
+            return "blocks"
+        return "preview"

@@ -9,7 +9,7 @@ SPEAK_TOOL: dict[str, Any] = {
     "function": {
         "name": SPEAK_TOOL_NAME,
         "description": (
-            "Speak aloud via orodruin TTS (Pipecat Kokoro by default). "
+            "Speak aloud via sophon TTS (Pipecat Kokoro by default). "
             "Call this when the user asks to hear something, read something aloud, "
             "run TTS, or play audio for chat text or a workspace document. "
             "Prefer path for files; turn for a prior chat message; text for short phrases."
@@ -54,7 +54,7 @@ TRANSCRIBE_TOOL: dict[str, Any] = {
     "function": {
         "name": TRANSCRIBE_TOOL_NAME,
         "description": (
-            "Transcribe an audio file via orodruin SST (Qwen3-ASR by default). "
+            "Transcribe an audio file via sophon SST (Qwen3-ASR by default). "
             "Call this when the user asks to transcribe, dictate from a recording, "
             "or convert speech in a workspace audio file to text."
         ),

@@ -149,6 +149,23 @@ def _score_exact_normalize(prediction: str, example: Example) -> ScoreResult:
     )
 
 
+def _score_contains_normalize(prediction: str, example: Example) -> ScoreResult:
+    gold_raw = example.fields.get("gold")
+    if gold_raw is None:
+        gold_raw = example.fields.get("answer")
+    if gold_raw is None:
+        gold_raw = example.raw.get("gold", example.raw.get("answer", ""))
+    gold_norm = _normalize(str(gold_raw))
+    pred_norm = _normalize(prediction)
+    ok = bool(gold_norm) and gold_norm in pred_norm
+    return ScoreResult(
+        correct=ok,
+        predicted=pred_norm or None,
+        gold=gold_norm,
+        notes="contains-normalize",
+    )
+
+
 def score(prediction: str, example: Example, task: BenchmarkTask) -> ScoreResult:
     name = task.scorer.name
     if name == "multiple_choice_letter":
@@ -157,4 +174,6 @@ def score(prediction: str, example: Example, task: BenchmarkTask) -> ScoreResult
         return _score_gsm8k_final(prediction, example)
     if name == "exact_normalize":
         return _score_exact_normalize(prediction, example)
+    if name == "contains_normalize":
+        return _score_contains_normalize(prediction, example)
     raise ValueError(f"unsupported scorer name: {name!r}")

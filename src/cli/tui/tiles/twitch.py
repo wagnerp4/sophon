@@ -17,15 +17,15 @@ from cli.tui.tiles.base import (
 
 
 def _credentials() -> tuple[str, str] | None:
-    client_id = os.environ.get("ORODRUIN_TWITCH_CLIENT_ID", "").strip().strip("\"'")
-    client_secret = os.environ.get("ORODRUIN_TWITCH_CLIENT_SECRET", "").strip().strip("\"'")
+    client_id = os.environ.get("SOPHON_TWITCH_CLIENT_ID", "").strip().strip("\"'")
+    client_secret = os.environ.get("SOPHON_TWITCH_CLIENT_SECRET", "").strip().strip("\"'")
     if not client_id or not client_secret:
         return None
     return client_id, client_secret
 
 
 def _limit() -> int:
-    raw = os.environ.get("ORODRUIN_TWITCH_LIMIT", "8").strip()
+    raw = os.environ.get("SOPHON_TWITCH_LIMIT", "8").strip()
     try:
         return max(1, min(int(raw or "8"), 20))
     except ValueError:
@@ -33,27 +33,27 @@ def _limit() -> int:
 
 
 def _profile_name() -> str:
-    return os.environ.get("ORODRUIN_TWITCH_PROFILE", "default").strip() or "default"
+    return os.environ.get("SOPHON_TWITCH_PROFILE", "default").strip() or "default"
 
 
 def _mode() -> str:
-    raw = os.environ.get("ORODRUIN_TWITCH_MODE", "top").strip().lower() or "top"
+    raw = os.environ.get("SOPHON_TWITCH_MODE", "top").strip().lower() or "top"
     if raw in ("channels", "follow", "following", "user"):
         return "channels"
     return "top"
 
 
 def _channels() -> list[str]:
-    raw = os.environ.get("ORODRUIN_TWITCH_CHANNELS", "").strip()
+    raw = os.environ.get("SOPHON_TWITCH_CHANNELS", "").strip()
     return [part.strip().lstrip("@").lower() for part in raw.split(",") if part.strip()]
 
 
 def _language() -> str:
-    return os.environ.get("ORODRUIN_TWITCH_LANGUAGE", "").strip().lower()
+    return os.environ.get("SOPHON_TWITCH_LANGUAGE", "").strip().lower()
 
 
 def _game_name() -> str:
-    return os.environ.get("ORODRUIN_TWITCH_GAME", "").strip()
+    return os.environ.get("SOPHON_TWITCH_GAME", "").strip()
 
 
 def _token_cache_path():
@@ -101,7 +101,7 @@ def _fetch_app_token(client_id: str, client_secret: str) -> str:
     req = Request(
         f"https://id.twitch.tv/oauth2/token?{query}",
         data=b"",
-        headers={"User-Agent": "orodruin-dashboard/0.1"},
+        headers={"User-Agent": "sophon-dashboard/0.1"},
         method="POST",
     )
     with urlopen(req, timeout=12.0) as resp:
@@ -202,7 +202,7 @@ def _fetch_top_streams(client_id: str, token: str, limit: int) -> list[dict[str,
 
 def _fetch_channel_streams(client_id: str, token: str, channels: list[str], limit: int) -> list[dict[str, Any]]:
     if not channels:
-        raise ValueError("ORODRUIN_TWITCH_MODE=channels requires ORODRUIN_TWITCH_CHANNELS")
+        raise ValueError("SOPHON_TWITCH_MODE=channels requires SOPHON_TWITCH_CHANNELS")
     rows: list[dict[str, Any]] = []
     chunk_size = 100
     for i in range(0, len(channels), chunk_size):
@@ -226,7 +226,7 @@ def _fetch_twitch() -> TileState:
     creds = _credentials()
     if creds is None:
         raise ValueError(
-            "set ORODRUIN_TWITCH_CLIENT_ID and ORODRUIN_TWITCH_CLIENT_SECRET "
+            "set SOPHON_TWITCH_CLIENT_ID and SOPHON_TWITCH_CLIENT_SECRET "
             "(Twitch developer application)"
         )
     client_id, client_secret = creds

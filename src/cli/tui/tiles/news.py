@@ -30,7 +30,7 @@ _ARXIV_PER_QUERY = 3
 
 
 def _news_limit() -> int:
-    raw = os.environ.get("ORODRUIN_NEWS_LIMIT", "6").strip()
+    raw = os.environ.get("SOPHON_NEWS_LIMIT", "6").strip()
     try:
         return max(1, min(int(raw or "6"), 12))
     except ValueError:
@@ -38,7 +38,7 @@ def _news_limit() -> int:
 
 
 def _papers_limit() -> int:
-    raw = os.environ.get("ORODRUIN_PAPERS_LIMIT", "4").strip()
+    raw = os.environ.get("SOPHON_PAPERS_LIMIT", "4").strip()
     try:
         return max(1, min(int(raw or "4"), 8))
     except ValueError:
@@ -46,30 +46,30 @@ def _papers_limit() -> int:
 
 
 def _feeds() -> list[str]:
-    raw = os.environ.get("ORODRUIN_NEWS_FEEDS", _DEFAULT_FEEDS).strip()
+    raw = os.environ.get("SOPHON_NEWS_FEEDS", _DEFAULT_FEEDS).strip()
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def _want_hn() -> bool:
-    raw = os.environ.get("ORODRUIN_NEWS_HN", "1").strip().lower()
+    raw = os.environ.get("SOPHON_NEWS_HN", "1").strip().lower()
     return raw not in ("", "0", "false", "no", "off")
 
 
 def _want_hf() -> bool:
-    raw = os.environ.get("ORODRUIN_PAPERS_HF", "1").strip().lower()
+    raw = os.environ.get("SOPHON_PAPERS_HF", "1").strip().lower()
     return raw not in ("", "0", "false", "no", "off")
 
 
 def _arxiv_cat() -> str:
-    return os.environ.get("ORODRUIN_NEWS_ARXIV_CAT", "").strip() or os.environ.get(
-        "ORODRUIN_PAPERS_ARXIV_CAT", ""
+    return os.environ.get("SOPHON_NEWS_ARXIV_CAT", "").strip() or os.environ.get(
+        "SOPHON_PAPERS_ARXIV_CAT", ""
     ).strip()
 
 
 def _arxiv_queries() -> list[str]:
     raw = (
-        os.environ.get("ORODRUIN_PAPERS_ARXIV_QUERY", "").strip()
-        or os.environ.get("ORODRUIN_NEWS_ARXIV_QUERY", "").strip()
+        os.environ.get("SOPHON_PAPERS_ARXIV_QUERY", "").strip()
+        or os.environ.get("SOPHON_NEWS_ARXIV_QUERY", "").strip()
     )
     if raw:
         return [part.strip() for part in raw.split("||") if part.strip()]

@@ -1,0 +1,24 @@
+# sophon keybinds (project profile)
+# Restart is not required if you save this file from the editor.
+# Textual key names: ctrl+s, ctrl+shift+o, right, f2
+# Empty quotes unbind an action.
+# slash: maps a key to /command (name without the slash).
+
+save_file: ctrl+s
+save_as: ctrl+shift+s
+new_file: ctrl+n
+new_folder: ""
+open_file: ctrl+o
+open_folder: ctrl+shift+o
+find_in_file: ctrl+f
+refresh_tree: ctrl+r
+cycle_tree: ctrl+shift+t
+toggle_project: ctrl+b
+toggle_aux: ctrl+j
+accept_completion: right
+copy_chat: ctrl+y
+listen: ctrl+l
+open_models: ctrl+m
+slash:
+  models: ctrl+shift+m
+  permissions: f2

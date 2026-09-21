@@ -3,9 +3,9 @@ from __future__ import annotations
 from PIL import Image
 
 _BG = (18, 20, 24)
-_MAX_TEXT_PAGES = 20
-# TODO: optional higher-dpi raster when the preview pane is large
+_MAX_RASTER = 2048
 # TODO: two-page spread
+# TODO: extract embedded PDF image XObjects as a figure strip (no full-page raster)
 
 
 def _load_pymupdf():
@@ -51,28 +51,48 @@ def open_pdf(data: bytes):
     return doc
 
 
-def pdf_source_note(doc) -> str:
+def pdf_page_body(doc, page_index: int) -> str:
+    last = int(doc.page_count) - 1
+    page_index = max(0, min(last, int(page_index)))
+    page = doc[page_index]
+    body = ""
+    try:
+        body = (page.get_text("markdown") or "").strip()
+    except Exception:
+        body = ""
+    if not body:
+        try:
+            body = (page.get_text("text", sort=True) or "").strip()
+        except TypeError:
+            body = (page.get_text("text") or "").strip()
+    return body or "(no extractable text on this page)"
+
+
+def pdf_page_source(doc, page_index: int) -> str:
     count = int(doc.page_count)
-    chunks = [
-        f"PDF · {count} page{'s' if count != 1 else ''}",
-        "Preview-only. PgUp/PgDn or left/right changes page. Saving is disabled.",
-        "",
-    ]
-    for index in range(min(count, _MAX_TEXT_PAGES)):
-        text = (doc[index].get_text("text") or "").strip()
-        chunks.append(f"--- page {index + 1} ---")
-        chunks.append(text or "(no extractable text)")
-        chunks.append("")
-    if count > _MAX_TEXT_PAGES:
-        chunks.append(f"--- {count - _MAX_TEXT_PAGES} more pages not listed ---")
-    return "\n".join(chunks)
+    last = count - 1
+    page_index = max(0, min(last, int(page_index)))
+    return "\n".join(
+        [
+            f"PDF · {count} page{'s' if count != 1 else ''}",
+            "Preview-only. PgUp/PgDn or left/right changes page. Saving is disabled.",
+            "",
+            f"--- page {page_index + 1} ---",
+            pdf_page_body(doc, page_index),
+            "",
+        ]
+    )
+
+
+def pdf_source_note(doc) -> str:
+    return pdf_page_source(doc, 0)
 
 
 def render_pdf_page(doc, page_index: int, width: int, height: int) -> Image.Image:
     pymupdf = _load_pymupdf()
 
-    width = max(2, int(width))
-    height = max(2, int(height))
+    width = max(2, min(_MAX_RASTER, int(width)))
+    height = max(2, min(_MAX_RASTER, int(height)))
     last = int(doc.page_count) - 1
     page_index = max(0, min(last, int(page_index)))
     page = doc[page_index]

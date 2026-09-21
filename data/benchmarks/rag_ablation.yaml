@@ -1,0 +1,23 @@
+id: rag_ablation
+description: "RAG impact ablation: same questions with and without default LEANN corpus context."
+
+source:
+  kind: jsonl
+  path: "rag/ablation.jsonl"
+
+prompt:
+  type: freeform
+  system: "Answer using only the provided context when present. Be concise."
+  template: |
+    {question}
+  field_map:
+    question: question
+    gold: gold
+
+scorer:
+  name: contains_normalize
+  num_choices: 2
+
+defaults:
+  max_new_tokens: 256
+  max_examples: 20

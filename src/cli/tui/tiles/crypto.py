@@ -25,7 +25,7 @@ _KRAKEN_RESULT_ALIASES = {
 
 
 def _symbols() -> list[str]:
-    raw = os.environ.get("ORODRUIN_CRYPTO_SYMBOLS", "BTC,ETH,SOL").strip()
+    raw = os.environ.get("SOPHON_CRYPTO_SYMBOLS", "BTC,ETH,SOL").strip()
     parts = [part.strip().upper() for part in raw.split(",") if part.strip()]
     return parts or ["BTC", "ETH", "SOL"]
 
@@ -137,11 +137,11 @@ def _fetch_binance() -> TileState:
 
 
 def _fetch_crypto() -> TileState:
-    provider = os.environ.get("ORODRUIN_CRYPTO_PROVIDER", "kraken").strip().lower() or "kraken"
+    provider = os.environ.get("SOPHON_CRYPTO_PROVIDER", "kraken").strip().lower() or "kraken"
     if provider == "binance":
         return _fetch_binance()
     if provider != "kraken":
-        raise ValueError(f"unsupported ORODRUIN_CRYPTO_PROVIDER={provider!r} (use kraken or binance)")
+        raise ValueError(f"unsupported SOPHON_CRYPTO_PROVIDER={provider!r} (use kraken or binance)")
     return _fetch_kraken()
 
 

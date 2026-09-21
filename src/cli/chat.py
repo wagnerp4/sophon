@@ -8,7 +8,7 @@ _src_root_s = str(_src_root)
 if _src_root_s not in sys.path:
     sys.path.insert(0, _src_root_s)
 
-# Todo: remove this path bootstrap after the package uses consistent orodruin.* imports end-to-end.
+# Todo: remove this path bootstrap after the package uses consistent sophon.* imports end-to-end.
 
 import datetime as _dt
 import json
@@ -21,6 +21,16 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Literal
 
 from cli.chat_stats import SessionStats, initial_debug_mode_from_env
+from cli.chat_trace import (
+    HeartbeatStep,
+    RetrievalTrace,
+    ToolCallTrace,
+    TurnTrace,
+    args_preview,
+    build_turn_trace,
+    format_heartbeat_step_plain,
+    tool_api_label,
+)
 from backend.hf.backend import (
     GenerationResult,
     ModelMeta,
@@ -31,14 +41,23 @@ from backend.hf.backend import (
 )
 from backend.chat_resolve import (
     ChatBackendId,
+    backend_help_tokens,
     chat_backend_ids,
+    is_managed_backend,
     is_server_backend,
     list_server_models,
     lmstudio_reachable,
+    managed_backend_ids,
     normalize_chat_backend_token,
     ollama_reachable,
+    provider_api_key,
+    provider_key_hint,
+    missing_provider_key_message,
     resolve_chat_backend,
+    server_backend_reachable,
     server_chat_complete,
+    server_target_prefixes,
+    sync_managed_model_index,
 )
 
 from backend.hf.paths import (
@@ -48,12 +67,31 @@ from backend.hf.paths import (
     resolve_local_model_dir,
 )
 from processing.text.context import ContextBuildResult, build_messages_for_model
-from processing.text.memory import MemoryScope, MemoryStore, open_memory_store
+from processing.text.memory import (
+    MemoryBudget,
+    MemoryLayer,
+    MemoryScope,
+    MemoryStore,
+    budget_from_env,
+    open_memory_layer,
+    open_memory_store,
+)
 from processing.text.retrieval import RagRetriever, RetrievalQuery, RetrievalResult, load_rag_retriever, rag_retriever_ids
+from processing.text.skills import SkillCatalog, open_skill_catalog
+from processing.text.retrieval.adaptive import AdaptiveDecision, RetrievalDecision, decide_retrieval
+from processing.text.retrieval.types import empty_result
 from processing.audio.speech.cli import SttCliOptions, TtsCliOptions
 from processing.audio.speech.factory import create_speech_stt_engine, create_speech_tts_engine
 from processing.audio.speech.protocols import SpeechSttEngine, SpeechTtsEngine
-from processing.audio.speech.speak import speak_text_blocking
+from processing.audio.speech.playback import play_wav_file
+from processing.audio.speech.session_store import (
+    SessionSpeechStore,
+    SpeechClip,
+    default_replay_speeds,
+    format_replay_speed,
+    parse_replay_speed,
+)
+from processing.audio.speech.speak import speak_text_blocking, speak_text_to_store
 from processing.audio.speech.types import (
     TtsBackendId,
     SttBackendId,
@@ -63,7 +101,7 @@ from processing.audio.speech.types import (
     stt_backend_help_tokens,
     tts_backend_help_tokens,
 )
-from utils.device.env_bootstrap import orodruin_chat_logs_dir, orodruin_project_root
+from utils.device.env_bootstrap import sophon_chat_logs_dir, sophon_project_root
 from backend.hf.registry import (
     HF_MODEL_PRESETS,
     local_only_model_dirs,
@@ -81,14 +119,18 @@ from utils.download.hf import (
     download_preset_snapshot,
     format_download_progress,
     hub_tqdm_bridge_factory,
+    is_file_count_progress,
+    parse_hub_size_hint,
+    scan_local_dir_download_bytes,
     split_hub_progress_label,
     throttled_progress_callback,
+    watch_local_download_bytes,
 )
 
 
 @dataclass
 class _GenParams:
-    max_new_tokens: int = 512
+    max_new_tokens: int = 2048
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -115,33 +157,76 @@ class ChatCliParams:
     rag: str
     rag_index: str | None
     rag_top_k: int
+    rag_adaptive: bool
+    rag_structure: str
+    rag_structure_dir: str | None
     memory_db: str | None
     memory_session: str | None
     memory_user: str | None
     memory_recall_turns: int
     tts: TtsCliOptions
     sst: SttCliOptions
-    chat_first: bool = False
+    chat_first: bool = True
     startup_preload: bool = False
 
 
 @dataclass(frozen=True)
 class ChatIo:
     emit: Callable[[str], None]
-    on_assistant: Callable[[str], None]
+    on_assistant: Callable[..., None]
     on_dictate: Callable[[str], None] | None = None
+    on_speech_clip: Callable[[SpeechClip], None] | None = None
+    on_mic: Callable[[str], None] | None = None
+    on_clear: Callable[[], None] | None = None
+    on_step: Callable[[HeartbeatStep], None] | None = None
+    on_heartbeat_end: Callable[[], None] | None = None
+    on_permission: Callable[[object], str] | None = None
+    on_setup_choice: Callable[[str], str] | None = None
 
 
 def _default_emit(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def _default_on_assistant(text: str) -> None:
+def _default_on_assistant(text: str, trace: TurnTrace | None = None) -> None:
+    if trace is not None:
+        from cli.chat_display import format_turn_trace_lines
+
+        for line in format_turn_trace_lines(trace, for_markup=False, reply_text=text):
+            print(line.plain, file=sys.stderr, flush=True)
     print(text)
     print(flush=True)
 
 
-_DEFAULT_IO = ChatIo(emit=_default_emit, on_assistant=_default_on_assistant)
+def _default_on_clear() -> None:
+    return
+
+
+def _default_on_step(step: HeartbeatStep) -> None:
+    print(format_heartbeat_step_plain(step), file=sys.stderr, flush=True)
+
+
+def _default_on_heartbeat_end() -> None:
+    return
+
+
+def _default_on_permission(request: object) -> str:
+    from harness.approval import DECISION_DENY, PermissionRequest
+    from harness.prompt import prompt_stdio
+
+    if not isinstance(request, PermissionRequest):
+        return DECISION_DENY
+    return prompt_stdio(request)
+
+
+_DEFAULT_IO = ChatIo(
+    emit=_default_emit,
+    on_assistant=_default_on_assistant,
+    on_clear=_default_on_clear,
+    on_step=_default_on_step,
+    on_heartbeat_end=_default_on_heartbeat_end,
+    on_permission=_default_on_permission,
+)
 _CURRENT_IO = _DEFAULT_IO
 
 
@@ -153,6 +238,133 @@ def configure_chat_io(io: ChatIo) -> None:
 def reset_chat_io() -> None:
     global _CURRENT_IO
     _CURRENT_IO = _DEFAULT_IO
+
+
+def _wipe_transcript_ui() -> None:
+    cb = _CURRENT_IO.on_clear
+    if cb is not None:
+        cb()
+
+
+def _emit_step(step: HeartbeatStep) -> None:
+    cb = _CURRENT_IO.on_step
+    if cb is not None:
+        cb(step)
+        return
+    _default_on_step(step)
+
+
+def _ask_permission(request: object) -> str:
+    from harness.approval import DECISION_DENY, PermissionRequest
+
+    name = getattr(request, "tool", "tool") if request is not None else "tool"
+    _emit_step(
+        HeartbeatStep(kind="permission", name=str(name), preview="waiting 1/2/3", ok=True)
+    )
+    cb = _CURRENT_IO.on_permission
+    if cb is None:
+        return DECISION_DENY
+    if not isinstance(request, PermissionRequest):
+        return DECISION_DENY
+    # TODO: abort the wait when the user hits Esc / stop on the generation turn
+    return cb(request)
+
+
+def _emit_think(thought: str) -> None:
+    body = (thought or "").strip()
+    if not body:
+        return
+    preview = body if len(body) <= 2400 else body[:2400] + "…"
+    _emit_step(HeartbeatStep(kind="think", name="reasoning", preview=preview, ok=True))
+
+
+def _emit_heartbeat_end() -> None:
+    cb = _CURRENT_IO.on_heartbeat_end
+    if cb is not None:
+        cb()
+
+
+def _tool_progress_line(name: str, preview: object) -> None:
+    if _CURRENT_IO.on_step is not None:
+        return
+    extra = str(preview or "").strip()
+    _emit(f"({name} {extra})" if extra else f"({name})")
+
+
+def _arg_path(args: dict) -> str | None:
+    for key in ("path", "file"):
+        raw = args.get(key)
+        if raw:
+            return str(raw).strip()
+    return None
+
+
+def _emit_tool_heartbeat(name: str, args: dict, result: str, latency_s: float) -> None:
+    preview = args_preview(name, args)
+    ok = not str(result).lower().startswith("error:")
+    path = _arg_path(args)
+    _emit_step(
+        HeartbeatStep(
+            kind="tool",
+            name=name or "unknown",
+            preview=preview,
+            path=path,
+            ok=ok,
+            latency_s=latency_s,
+        )
+    )
+    if str(name).startswith("skill_"):
+        skill_name = str(args.get("name") or "").strip()
+        _emit_step(
+            HeartbeatStep(
+                kind="skill",
+                name=name,
+                preview=skill_name or preview,
+                path=path,
+                ok=ok,
+                latency_s=latency_s,
+            )
+        )
+    if path:
+        _emit_step(
+            HeartbeatStep(
+                kind="file",
+                name=name,
+                preview=path,
+                path=path,
+                ok=ok,
+                latency_s=latency_s,
+            )
+        )
+
+
+def _emit_context_heartbeat(state: _SessionState, built: object) -> None:
+    attached = ", ".join(state.attached_skills) if state.attached_skills else "none"
+    dropped = state.last_memory_dropped
+    blocks = getattr(built, "injected_blocks", None) or []
+    block_s = ",".join(str(b) for b in blocks) if blocks else "none"
+    _emit_step(
+        HeartbeatStep(
+            kind="context",
+            name="pack",
+            preview=f"attached={attached} dropped={dropped} blocks={block_s}",
+            ok=True,
+        )
+    )
+    _emit_step(
+        HeartbeatStep(kind="idle", name="model", preview="waiting", ok=True)
+    )
+
+
+def _emit_assistant(text: str, trace: TurnTrace | None = None) -> None:
+    cb = _CURRENT_IO.on_assistant
+    if trace is not None:
+        try:
+            cb(text, trace)
+            return
+        except TypeError:
+            pass
+    cb(text)
 
 
 @dataclass
@@ -169,10 +381,18 @@ class _SessionState:
     params: _GenParams = field(default_factory=_GenParams)
     exit_requested: bool = False
     retriever: RagRetriever | None = None
+    structure_retriever: RagRetriever | None = None
     retrieval_top_k: int = 5
+    rag_adaptive: bool = True
+    last_retrieval_decision: dict | None = None
     memory: MemoryStore | None = None
     memory_scope: MemoryScope | None = None
     memory_recall_turns: int = 6
+    memory_layer: MemoryLayer | None = None
+    memory_budget: MemoryBudget | None = None
+    last_memory_dropped: int = 0
+    skill_catalog: SkillCatalog | None = None
+    attached_skills: list[str] = field(default_factory=list)
     _last_persisted_user_obj_id: int = 0
     tts_enabled: bool = False
     tts_plain_text: bool = True
@@ -193,6 +413,8 @@ class _SessionState:
     sst_device: str | None = None
     sst_max_new_tokens: int = 1024
     sst_engine: SpeechSttEngine | None = None
+    sst_mic: object | None = None
+    sst_busy: bool = False
     model_path: str = ""
     preset_key: str | None = None
     quantization: str = "none"
@@ -200,13 +422,50 @@ class _SessionState:
     model_switching: bool = False
     adapter_path: str | None = None
     last_finetune_run_dir: Path | None = None
+    last_finetune_adapter_name: str | None = None
+    train_loss_history: list[float] = field(default_factory=list)
     finetune_running: bool = False
+    last_eval_summary: dict | None = None
+    eval_running: bool = False
     backend_id: ChatBackendId = "hf"
     server_model: str | None = None
     last_retrieval_metrics: dict | None = None
     retrieval_probe_history: list = field(default_factory=list)
     shell_session: object | None = None
     tool_max_rounds: int | None = None
+    assist: object | None = None
+    editor_open_path: str | None = None
+    editor_open_text: str | None = None
+    editor_workspace: Path | None = None
+    assist_ui_hook: object | None = None
+    speech_store: SessionSpeechStore | None = None
+    harness: object | None = None
+    last_permission: str = ""
+    shell_mode: bool = False
+    auto_attach: bool = True
+    slash_recents: list[str] = field(default_factory=list)
+    trainer_driver: str = "hf-lora"
+    trainer_task: str = ""
+    trainer_data: str = ""
+    trainer_model: str = ""
+    trainer_target: str = ""
+    trainer_fast_dev: bool = True
+    ssl4sed_running: bool = False
+    ssl4sed_proc: object | None = None
+    ssl4sed_thread: object | None = None
+    ssl4sed_run_dir: str = ""
+    ssl4sed_run_meta: str = ""
+    ssl4sed_run_log: str = ""
+    ssl4sed_default_target: str = ""
+    ssl4sed_registry: list | None = None
+    setup_pending: dict | None = None
+    setup_last_table: str = ""
+    setup_last_recipe: str = ""
+    delegation_depth: int = 0
+    quiet: bool = False
+    subagent_agent_type: str = "general"
+    subagent_service: object | None = None
+    last_subagent_run: object | None = None
 
 
 def _format_tool_max_rounds(value: int | None) -> str:
@@ -216,7 +475,7 @@ def _format_tool_max_rounds(value: int | None) -> str:
 
 
 def _tool_max_rounds_from_env() -> int | None:
-    raw = os.environ.get("ORODRUIN_TOOL_MAX_ROUNDS", "").strip().lower()
+    raw = os.environ.get("SOPHON_TOOL_MAX_ROUNDS", "").strip().lower()
     if raw in ("", "unlimited", "inf", "infinite", "none", "0"):
         return None
     try:
@@ -289,11 +548,11 @@ _SHORTCUTS: dict[str, str] = {}
 _HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "session",
-        ("help", "quit", "reset", "save", "pop", "regen", "system", "tokens", "stats", "debug"),
+        ("help", "quit", "reset", "clear", "save", "log", "pop", "regen", "system", "tokens", "stats", "debug", "chat", "auto-attach"),
     ),
     (
         "model",
-        ("backend", "models", "model", "model-download"),
+        ("backend", "models", "models-sync", "model", "model-download", "setup"),
     ),
     (
         "generation",
@@ -301,7 +560,26 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "tools",
-        ("tools", "obsidian-status", "mode"),
+        (
+            "tools",
+            "mode",
+            "permissions",
+            "obsidian-status",
+            "zotero-status",
+            "zotero-tree",
+            "zotero-search",
+            "zotero-metrics",
+            "zotero-read",
+            "google-status",
+            "overleaf-status",
+            "overleaf-list",
+            "overleaf-read",
+            "assist",
+        ),
+    ),
+    (
+        "subagents",
+        ("subagents",),
     ),
     (
         "speech",
@@ -322,6 +600,9 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tts-ollama-model",
             "transcribe",
             "listen",
+            "listen-cancel",
+            "play",
+            "clips",
             "sst",
             "sst-backend",
             "sst-model",
@@ -330,18 +611,34 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "memory",
-        ("memory-status", "memory-clear", "rag-status", "rag-probe"),
+        ("memory", "memory-status", "memory-clear", "rag-status", "rag-probe", "rag-index"),
+    ),
+    (
+        "skills",
+        ("skill",),
+    ),
+    (
+        "eval",
+        ("eval",),
     ),
     (
         "train",
-        ("finetune", "finetune-status", "finetune-datasets", "adapter"),
+        ("finetune", "finetune-status", "finetune-datasets", "finetune-config", "adapter", "trainer"),
     ),
 )
 
 
-def _register(name: str, help_text: str, shortcut: str | None = None):
+def _register(
+    name: str,
+    help_text: str,
+    shortcut: str | None = None,
+    aliases: tuple[str, ...] = (),
+):
     def deco(fn: Callable[["_SessionState", str], bool]) -> Callable[["_SessionState", str], bool]:
-        _COMMANDS[name] = _Command(name=name, help_text=help_text, handler=fn)
+        cmd = _Command(name=name, help_text=help_text, handler=fn)
+        _COMMANDS[name] = cmd
+        for alias in aliases:
+            _COMMANDS[alias] = cmd
         if shortcut:
             _SHORTCUTS[shortcut] = name
         return fn
@@ -363,15 +660,51 @@ def _dictate(text: str) -> None:
     _emit(body)
 
 
-def _format_help_command(cmd: _Command, shortcut_for: dict[str, str]) -> str:
+def _announce_speech_clip(clip: SpeechClip) -> None:
+    cb = _CURRENT_IO.on_speech_clip
+    if cb is not None:
+        cb(clip)
+        return
+    from cli.chat_display import format_speech_clip_line
+
+    _emit(format_speech_clip_line(clip).plain)
+
+
+def _notify_mic(phase: str) -> None:
+    cb = _CURRENT_IO.on_mic
+    if cb is not None:
+        cb(phase)
+
+
+def _alias_names() -> dict[str, list[str]]:
+    aliases: dict[str, list[str]] = {}
+    for key, cmd in _COMMANDS.items():
+        if key != cmd.name:
+            aliases.setdefault(cmd.name, []).append(key)
+    return aliases
+
+
+def _format_help_command(
+    cmd: _Command,
+    shortcut_for: dict[str, str],
+    aliases: dict[str, list[str]] | None = None,
+) -> str:
+    extra: list[str] = []
     sc = shortcut_for.get(cmd.name)
-    head = f"  /{cmd.name}" + (f" | {sc}" if sc else "")
+    if sc:
+        extra.append(sc)
+    for alias in (aliases or {}).get(cmd.name, []):
+        extra.append(alias)
+    suffix = " | ".join(extra)
+    head = f"  /{cmd.name}" + (f" | {suffix}" if suffix else "")
     return f"{head:<24} {cmd.help_text}"
 
 
 def _format_help(section: str | None = None) -> str:
     shortcut_for = {v: k for k, v in _SHORTCUTS.items()}
+    aliases = _alias_names()
     listed: set[str] = set()
+    listed_names: set[str] = set()
     blocks: list[tuple[str, list[str]]] = []
     for name, cmd_names in _HELP_SECTIONS:
         lines: list[str] = []
@@ -380,14 +713,17 @@ def _format_help(section: str | None = None) -> str:
             if cmd is None:
                 continue
             listed.add(cmd_name)
-            lines.append(_format_help_command(cmd, shortcut_for))
+            listed_names.add(cmd.name)
+            lines.append(_format_help_command(cmd, shortcut_for, aliases))
         if lines:
             blocks.append((name, lines))
-    other_lines = [
-        _format_help_command(cmd, shortcut_for)
-        for cmd_name, cmd in _COMMANDS.items()
-        if cmd_name not in listed
-    ]
+    other_seen: set[str] = set()
+    other_lines: list[str] = []
+    for cmd_name, cmd in _COMMANDS.items():
+        if cmd_name in listed or cmd.name in listed_names or cmd.name in other_seen:
+            continue
+        other_seen.add(cmd.name)
+        other_lines.append(_format_help_command(cmd, shortcut_for, aliases))
     if other_lines:
         blocks.append(("other", other_lines))
 
@@ -405,12 +741,60 @@ def _format_help(section: str | None = None) -> str:
         rows.append(f"{name}:")
         rows.extend(lines)
     rows.append("")
-    rows.append("  /help [section]          Filter by section (session model generation tools speech memory train).")
+    rows.append(
+        "  /help [section]          Filter by section "
+        "(session model generation tools subagents speech memory skills eval train)."
+    )
     rows.append("  \"\"\"multi-line\"\"\"        Triple-quoted input is gathered until the closing \"\"\".")
     return "\n".join(rows)
 
 
 format_chat_help = _format_help
+
+
+@dataclass(frozen=True)
+class SlashCommandInfo:
+    name: str
+    help_text: str
+    section: str
+    aliases: tuple[str, ...]
+    shortcut: str
+
+
+def list_slash_commands() -> tuple[SlashCommandInfo, ...]:
+    section_of: dict[str, str] = {}
+    for section, names in _HELP_SECTIONS:
+        for cmd_name in names:
+            section_of.setdefault(cmd_name, section)
+    shortcut_for = {v: k for k, v in _SHORTCUTS.items()}
+    aliases = _alias_names()
+    seen: set[str] = set()
+    rows: list[SlashCommandInfo] = []
+    ordered_names: list[str] = []
+    for _section, names in _HELP_SECTIONS:
+        for cmd_name in names:
+            if cmd_name not in ordered_names:
+                ordered_names.append(cmd_name)
+    for cmd_name, cmd in _COMMANDS.items():
+        if cmd.name not in ordered_names:
+            ordered_names.append(cmd.name)
+    for cmd_name in ordered_names:
+        cmd = _COMMANDS.get(cmd_name)
+        if cmd is None or cmd.name in seen:
+            continue
+        seen.add(cmd.name)
+        section = section_of.get(cmd.name) or section_of.get(cmd_name) or "other"
+        alias_list = tuple(sorted(aliases.get(cmd.name, [])))
+        rows.append(
+            SlashCommandInfo(
+                name=cmd.name,
+                help_text=cmd.help_text,
+                section=section,
+                aliases=alias_list,
+                shortcut=shortcut_for.get(cmd.name, ""),
+            )
+        )
+    return tuple(rows)
 
 
 @dataclass(frozen=True)
@@ -420,7 +804,9 @@ class ModelPickerEntry:
     detail: str
     local: bool
     current: bool
-    kind: Literal["header", "preset", "path"] = "preset"
+    kind: Literal["header", "preset", "path", "adapter"] = "preset"
+    group: str = ""
+    child_count: int = 0
 
 
 def chat_session_has_weights(state: _SessionState) -> bool:
@@ -433,48 +819,67 @@ def chat_session_ready(state: _SessionState) -> bool:
     return chat_session_has_weights(state)
 
 
+def harness_inventory_counts(state: _SessionState) -> tuple[int, int, int]:
+    from cli.chat_tools import default_chat_tools
+
+    catalog = state.skill_catalog
+    n_skills = len(catalog.entries) if catalog is not None else 0
+    tools = default_chat_tools(
+        tts_tool=_tts_tools_enabled(),
+        sst_tool=_sst_tools_enabled(),
+        obsidian_tool=_obsidian_tools_wanted(),
+        zotero_tool=_zotero_tools_wanted(),
+        google_tool=_google_tools_wanted(),
+        overleaf_tool=_overleaf_tools_wanted(),
+        shell_tool=_shell_tools_wanted(),
+        editor_tool=_editor_tools_wanted(),
+        memory_tool=state.memory_layer is not None and _memory_tools_wanted(),
+        skill_tool=catalog is not None and _skill_tools_wanted(),
+        subagent_tool=_spawn_tools_in_schema(state),
+    )
+    n_mcp = 0
+    # TODO: count live MCP connectors once a connector registry exists
+    return n_skills, len(tools), n_mcp
+
+
+def _env_key_set_hint(key: str) -> str:
+    from utils.device.env_bootstrap import dotenv_location_label
+
+    return f"(set {key} in {dotenv_location_label()})"
+
+
+def _colon_provider_hint(raw: str) -> str | None:
+    token = raw.strip()
+    if ":" in token or "/" in token or "\\" in token or "_" not in token:
+        return None
+    head, _rest = token.split("_", 1)
+    aliases = {
+        "openai": "openai",
+        "anthropic": "anthropic",
+        "google": "google",
+        "gemini": "google",
+        "ollama": "ollama",
+        "lmstudio": "lmstudio",
+    }
+    backend = aliases.get(head.lower())
+    if backend is None:
+        return None
+    return (
+        f"Server models use a colon prefix, not underscore. "
+        f"Example: openai:gpt-4.1 (not openai_gpt4.1)"
+    )
+
+
 def _content_to_text(content: object) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-            elif isinstance(block, str):
-                parts.append(block)
-        return "".join(parts)
-    return str(content)
+    from cli.agent_runtime import content_to_text
+
+    return content_to_text(content)
 
 
 def _messages_for_server(messages: list[dict[str, object]]) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    for msg in messages:
-        role = str(msg.get("role") or "user")
-        item: dict[str, object] = {"role": role}
-        if role == "tool":
-            item["content"] = _content_to_text(msg.get("content"))
-            tcid = msg.get("tool_call_id")
-            if tcid is not None:
-                item["tool_call_id"] = str(tcid)
-            name = msg.get("name")
-            if name is not None:
-                item["name"] = str(name)
-        elif role == "assistant" and msg.get("tool_calls"):
-            content = msg.get("content")
-            if content is None:
-                item["content"] = None
-            else:
-                item["content"] = _content_to_text(content)
-            item["tool_calls"] = msg["tool_calls"]
-        else:
-            item["content"] = _content_to_text(msg.get("content"))
-        out.append(item)
-    return out
+    from cli.agent_runtime import messages_for_server
+
+    return messages_for_server(messages)
 
 
 def _pick_default_server_model(backend_id: ChatBackendId) -> str | None:
@@ -488,7 +893,7 @@ def _pick_default_server_model(backend_id: ChatBackendId) -> str | None:
 def _parse_server_target(token: str) -> tuple[ChatBackendId, str] | None:
     raw = token.strip()
     lower = raw.lower()
-    for prefix, backend in (("ollama:", "ollama"), ("lmstudio:", "lmstudio"), ("lms:", "lmstudio")):
+    for prefix, backend in server_target_prefixes():
         if lower.startswith(prefix):
             name = raw[len(prefix) :].strip()
             if name:
@@ -506,25 +911,47 @@ def _append_server_section(
     *,
     backend: ChatBackendId,
     reachable: bool,
+    missing_key: str | None = None,
 ) -> None:
-    entries.append(ModelPickerEntry("", backend, "", False, False, "header"))
-    if not reachable:
+    from backend.model_index import load_provider_snapshot
+
+    group = backend
+    names: list[str] = []
+    detail = ""
+    if missing_key and not is_managed_backend(backend):
         entries.append(
-            ModelPickerEntry("", f"({backend} unreachable)", "", False, False, "header")
+            ModelPickerEntry("", backend, _env_key_set_hint(missing_key), False, False, "header", group, 0)
         )
         return
-    try:
+    if is_managed_backend(backend):
         names = list_server_models(backend)
-    except Exception as exc:
+        _, fetched_at = load_provider_snapshot(backend)
+        if fetched_at is None and not names:
+            if missing_key:
+                detail = _env_key_set_hint(missing_key)
+            else:
+                detail = "/models-sync"
+        elif missing_key:
+            detail = f"{len(names)} · key missing"
+        else:
+            detail = str(len(names))
+    elif not reachable:
         entries.append(
-            ModelPickerEntry("", f"(list failed: {exc})", "", False, False, "header")
+            ModelPickerEntry("", backend, "unreachable", False, False, "header", group, 0)
         )
         return
-    if not names:
-        entries.append(
-            ModelPickerEntry("", "(no models exposed)", "", False, False, "header")
-        )
-        return
+    else:
+        try:
+            names = list_server_models(backend)
+        except Exception as exc:
+            entries.append(
+                ModelPickerEntry("", backend, f"list failed: {exc}", False, False, "header", group, 0)
+            )
+            return
+        detail = str(len(names)) if names else "no models exposed"
+    entries.append(
+        ModelPickerEntry("", backend, detail, False, False, "header", group, len(names))
+    )
     for name in names:
         entries.append(
             ModelPickerEntry(
@@ -534,11 +961,15 @@ def _append_server_section(
                 local=True,
                 current=_is_current_server_entry(state, backend, name),
                 kind="preset",
+                group=group,
             )
         )
 
 
 def switch_to_server_model(state: _SessionState, backend: ChatBackendId, name: str) -> None:
+    if is_managed_backend(backend) and not provider_api_key(backend):
+        _emit(missing_provider_key_message(backend))
+        return
     try:
         names = list_server_models(backend)
     except Exception as exc:
@@ -555,6 +986,9 @@ def switch_to_server_model(state: _SessionState, backend: ChatBackendId, name: s
             if lower in item.lower():
                 match = item
                 break
+    if match is None and is_managed_backend(backend) and name.strip():
+        match = name.strip()
+        _emit(f"(not in local index for {backend}; using {match!r}. /models-sync to refresh)")
     if match is None:
         _emit(f"unknown {backend} model: {name!r}. Use /models.")
         return
@@ -585,10 +1019,13 @@ def switch_server_model(state: _SessionState, target: str) -> None:
 def switch_session_backend(state: _SessionState, token: str) -> None:
     backend = normalize_chat_backend_token(token)
     if backend is None:
-        _emit(f"usage: /backend [{' | '.join(chat_backend_ids())}]")
+        _emit(f"usage: /backend [{' | '.join(('auto',) + chat_backend_ids())}]")
         return
     if backend == state.backend_id:
         _emit(f"(already on backend {backend})")
+        return
+    if is_managed_backend(backend) and not provider_api_key(backend):
+        _emit(missing_provider_key_message(backend))
         return
     _unload_model_weights(state)
     state.backend_id = backend
@@ -624,7 +1061,19 @@ def build_model_picker_entries_for_root(
 
     entries: list[ModelPickerEntry] = []
     if downloaded or extra_dirs:
-        entries.append(ModelPickerEntry("", "huggingface (local)", "", False, False, "header"))
+        local_count = len(downloaded) + len(extra_dirs)
+        entries.append(
+            ModelPickerEntry(
+                "",
+                "huggingface (local)",
+                str(local_count),
+                False,
+                False,
+                "header",
+                "hf-local",
+                local_count,
+            )
+        )
         for key in downloaded:
             preset = HF_MODEL_PRESETS[key]
             is_current = current_backend == "hf" and (
@@ -642,6 +1091,7 @@ def build_model_picker_entries_for_root(
                     local=True,
                     current=is_current,
                     kind="preset",
+                    group="hf-local",
                 )
             )
         for path in extra_dirs:
@@ -658,11 +1108,23 @@ def build_model_picker_entries_for_root(
                     local=True,
                     current=is_current,
                     kind="path",
+                    group="hf-local",
                 )
             )
 
     if missing:
-        entries.append(ModelPickerEntry("", "huggingface (not downloaded)", "", False, False, "header"))
+        entries.append(
+            ModelPickerEntry(
+                "",
+                "huggingface (not downloaded)",
+                str(len(missing)),
+                False,
+                False,
+                "header",
+                "hf-missing",
+                len(missing),
+            )
+        )
         for key in missing:
             preset = HF_MODEL_PRESETS[key]
             entries.append(
@@ -673,13 +1135,41 @@ def build_model_picker_entries_for_root(
                     local=False,
                     current=False,
                     kind="preset",
+                    group="hf-missing",
                 )
             )
     return entries
 
 
+def _server_path_prefixes() -> tuple[str, ...]:
+    return tuple(prefix for prefix, _backend in server_target_prefixes()) + ("hf:",)
+
+
+def _managed_picker_state(backend: ChatBackendId) -> tuple[bool, str | None]:
+    if not provider_api_key(backend):
+        return False, provider_key_hint(backend)
+    return True, None
+
+
+def _adapter_index_entries(project_root: Path) -> list:
+    try:
+        from training.common.index import load_adapter_index
+    except ImportError:
+        return []
+    return list(load_adapter_index(project_root).entries)
+
+
 def build_model_picker_entries(state: _SessionState) -> list[ModelPickerEntry]:
     entries: list[ModelPickerEntry] = []
+    for backend in managed_backend_ids():
+        reachable, missing = _managed_picker_state(backend)
+        _append_server_section(
+            entries,
+            state,
+            backend=backend,
+            reachable=reachable,
+            missing_key=missing,
+        )
     _append_server_section(
         entries,
         state,
@@ -694,7 +1184,7 @@ def build_model_picker_entries(state: _SessionState) -> list[ModelPickerEntry]:
     )
     current_path = None
     if state.backend_id == "hf" and state.model_path.strip() and not state.model_path.startswith(
-        ("ollama:", "lmstudio:")
+        _server_path_prefixes()
     ):
         try:
             current_path = Path(state.model_path).resolve()
@@ -708,6 +1198,39 @@ def build_model_picker_entries(state: _SessionState) -> list[ModelPickerEntry]:
             current_backend=state.backend_id,
         )
     )
+    adapters = _adapter_index_entries(state.project_root)
+    if adapters:
+        entries.append(
+            ModelPickerEntry(
+                "",
+                "adapters",
+                str(len(adapters)),
+                False,
+                False,
+                "header",
+                "adapters",
+                len(adapters),
+            )
+        )
+        current_adapter = None
+        if state.adapter_path:
+            try:
+                current_adapter = str(Path(state.adapter_path).resolve())
+            except OSError:
+                current_adapter = state.adapter_path
+        for entry in adapters:
+            is_current = current_adapter is not None and entry.path == current_adapter
+            entries.append(
+                ModelPickerEntry(
+                    target=entry.name,
+                    title=entry.name,
+                    detail=f"{entry.preset} · {entry.dataset} · {entry.created}",
+                    local=True,
+                    current=is_current,
+                    kind="adapter",
+                    group="adapters",
+                )
+            )
     return entries
 
 
@@ -726,7 +1249,7 @@ def _resolve_model_target(token: str, root: Path) -> tuple[str | None, Path]:
     path = Path(raw).expanduser()
     if path.exists() or any(sep in raw for sep in ("/", "\\")):
         return None, path.resolve()
-    if ":" in raw and not raw.lower().startswith(("ollama:", "lmstudio:", "lms:", "hf:")):
+    if ":" in raw and not raw.lower().startswith(_server_path_prefixes()):
         return None, path.resolve()
     raise ValueError(f"unknown preset or path: {raw!r}")
 
@@ -750,18 +1273,24 @@ def format_model_catalog(
     view: str = "all",
 ) -> str:
     view_norm = view.strip().lower() or "all"
-    if view_norm not in ("all", "local", "downloaded", "missing", "remote"):
-        return "usage: /models [all | local | missing]"
+    known_views = ("all", "local", "downloaded", "missing", "remote", "adapters") + chat_backend_ids()
+    if view_norm not in known_views:
+        return "usage: /models [all | local | missing | adapters | openai | anthropic | google | ollama | lmstudio | hf]"
 
     lines: list[str] = [
         f"current: {_current_model_label(state)}",
         "",
     ]
 
-    def append_server_block(backend: ChatBackendId, reachable: bool) -> None:
+    def append_server_block(backend: ChatBackendId, reachable: bool, missing_key: str | None = None) -> None:
         lines.append(f"{backend}:")
-        if not reachable:
-            lines.append(f"  (unreachable)")
+        if missing_key:
+            lines.append(f"  {_env_key_set_hint(missing_key)}")
+            if not is_managed_backend(backend):
+                lines.append("")
+                return
+        if not reachable and not is_managed_backend(backend):
+            lines.append("  (unreachable)")
             lines.append("")
             return
         try:
@@ -771,7 +1300,10 @@ def format_model_catalog(
             lines.append("")
             return
         if not names:
-            lines.append("  (no models exposed)")
+            if is_managed_backend(backend):
+                lines.append("  (no local index. /models-sync)")
+            else:
+                lines.append("  (no models exposed)")
             lines.append("")
             return
         for name in names:
@@ -779,7 +1311,18 @@ def format_model_catalog(
             lines.append(_format_model_line(marker=marker, label=name, repo_or_path=f"{backend}:{name}"))
         lines.append("")
 
+    if view_norm in managed_backend_ids():
+        reachable, missing = _managed_picker_state(view_norm)
+        append_server_block(view_norm, reachable, missing)
+        return "\n".join(lines)
+    if view_norm in ("ollama", "lmstudio"):
+        append_server_block(view_norm, server_backend_reachable(view_norm))
+        return "\n".join(lines)
+
     if view_norm == "all":
+        for backend in managed_backend_ids():
+            reachable, missing = _managed_picker_state(backend)
+            append_server_block(backend, reachable, missing)
         append_server_block("ollama", ollama_reachable())
         append_server_block("lmstudio", lmstudio_reachable())
 
@@ -850,6 +1393,26 @@ def format_model_catalog(
             )
             lines.append(_format_model_line(marker=marker, label=str(path.name), repo_or_path=str(path)))
 
+    if view_norm in ("all", "local", "downloaded", "adapters"):
+        adapters = _adapter_index_entries(root)
+        if adapters:
+            lines.append("")
+            lines.append("adapters:")
+            for entry in adapters:
+                marker = (
+                    "*"
+                    if state.adapter_path
+                    and Path(state.adapter_path).resolve() == Path(entry.path).resolve()
+                    else " "
+                )
+                lines.append(
+                    _format_model_line(
+                        marker=marker,
+                        label=entry.name,
+                        repo_or_path=f"{entry.preset} · {entry.dataset} · {entry.created}",
+                    )
+                )
+
     return "\n".join(lines)
 
 
@@ -885,7 +1448,10 @@ def switch_session_model(
         switch_to_server_model(state, parsed[0], parsed[1])
         return
     if raw and ":" not in raw and not raw.lower().startswith("hf:"):
-        for backend in ("ollama", "lmstudio"):
+        search_order: tuple[ChatBackendId, ...] = ("ollama", "lmstudio") + managed_backend_ids()
+        for backend in search_order:
+            if is_managed_backend(backend) and not provider_api_key(backend):
+                continue
             try:
                 names = list_server_models(backend)
             except Exception:
@@ -902,7 +1468,13 @@ def switch_session_model(
         state.backend_id = "hf"
         state.server_model = None
 
-    preset_key, model_dir = _resolve_model_target(raw, state.project_root)
+    try:
+        preset_key, model_dir = _resolve_model_target(raw, state.project_root)
+    except ValueError as exc:
+        hint = _colon_provider_hint(raw)
+        if hint:
+            raise ValueError(f"{exc}. {hint}") from exc
+        raise
     has_config = (model_dir / "config.json").is_file()
     has_weights = model_dir_has_complete_weights(model_dir) if has_config else False
     if preset_key is not None:
@@ -972,28 +1544,33 @@ def switch_session_model(
 
 
 def _current_model_label(state: _SessionState) -> str:
+    from cli.chat_display import model_identity_line
+
+    extra = ""
     if is_server_backend(state.backend_id):
-        return f"backend={state.backend_id} model={state.server_model or '(none)'}"
-    if state.preset_key:
+        extra = f"backend={state.backend_id} model={state.server_model or '(none)'}"
+    elif state.preset_key:
         preset = HF_MODEL_PRESETS[state.preset_key]
-        return f"preset={state.preset_key} repo={preset.repo_id} path={state.model_path}"
-    if state.model_path.strip():
-        return f"path={state.model_path}"
-    return "(no model directory; use /models or /model PATH)"
+        extra = f"preset={state.preset_key} repo={preset.repo_id} path={state.model_path}"
+    elif state.model_path.strip():
+        extra = f"path={state.model_path}"
+    else:
+        extra = "(no model directory; use /models or /model PATH)"
+    return f"{model_identity_line(state)} | {extra}"
 
 
-@_register("help", "Show this help. /help [section] filters session|model|generation|tools|speech|memory|train.", shortcut="?")
+@_register("help", "Show this help. /help [section] filters session|model|generation|tools|speech|memory|skills|eval|train.", shortcut="?")
 def _cmd_help(state: _SessionState, arg: str) -> bool:
     _ = state
     _emit(_format_help(arg))
     return False
 
 
-@_register("backend", "Show or switch chat backend: /backend [auto|ollama|lmstudio|hf].")
+@_register("backend", "Show or switch chat backend: /backend [auto|ollama|lmstudio|hf|openai|anthropic|google].")
 def _cmd_backend(state: _SessionState, arg: str) -> bool:
     token = arg.strip()
     if not token:
-        _emit(f"backend={state.backend_id}  (set ORODRUIN_CHAT_BACKEND=auto|ollama|lmstudio|hf)")
+        _emit(f"backend={state.backend_id}  (set SOPHON_CHAT_BACKEND={backend_help_tokens()})")
         return False
     if token.lower() == "auto":
         try:
@@ -1008,13 +1585,42 @@ def _cmd_backend(state: _SessionState, arg: str) -> bool:
     return False
 
 
-@_register("models", "List all sources: ollama, lmstudio, huggingface.")
+@_register("models", "List all sources: openai, anthropic, google, ollama, lmstudio, huggingface.")
 def _cmd_models(state: _SessionState, arg: str) -> bool:
     _emit(format_model_catalog(state, view=arg.strip() or "all"))
     return False
 
 
-@_register("model", "Show or switch model: /model [ollama:NAME | lmstudio:NAME | PRESET | PATH].")
+@_register(
+    "models-sync",
+    "Refresh the versioned OpenAI/Anthropic/Google model index from the APIs. /models-sync [openai|anthropic|google].",
+    aliases=("models-refresh",),
+)
+def _cmd_models_sync(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from backend.model_index import managed_index_path
+
+    token = arg.strip().lower()
+    backends: tuple[str, ...] | None = None
+    if token:
+        if token not in managed_backend_ids():
+            _emit("usage: /models-sync [openai | anthropic | google]")
+            return False
+        backends = (token,)
+    _emit("syncing managed model index (API list) ...")
+    result = sync_managed_model_index(backends)
+    wanted = backends or managed_backend_ids()
+    for backend in wanted:
+        names = result.get(backend, [])
+        if not provider_api_key(backend):
+            _emit(f"  {backend}: skipped ({provider_key_hint(backend)} missing)")
+            continue
+        _emit(f"  {backend}: {len(names)} chat models")
+    _emit(f"wrote {managed_index_path()}")
+    return False
+
+
+@_register("model", "Show or switch model: /model [openai:NAME | anthropic:NAME | google:NAME | ollama:NAME | lmstudio:NAME | PRESET | PATH].")
 def _cmd_model(state: _SessionState, arg: str) -> bool:
     if not arg.strip():
         _emit(_current_model_label(state))
@@ -1024,6 +1630,16 @@ def _cmd_model(state: _SessionState, arg: str) -> bool:
     except ValueError as exc:
         _emit(str(exc))
     return False
+
+
+@_register(
+    "setup",
+    "Device recommender: /setup reads and prints top 10, then install rank 1 or skip. /setup apply | skip | why.",
+)
+def _cmd_setup(state: _SessionState, arg: str) -> bool:
+    from cli.setup_commands import handle_setup
+
+    return handle_setup(state, arg)
 
 
 @_register("model-download", "Download a preset from Hugging Face Hub: /model-download PRESET.")
@@ -1057,21 +1673,77 @@ def _cmd_model_download(state: _SessionState, arg: str) -> bool:
         def on_download_status(text: str) -> None:
             _emit(f"hub: {text}")
 
-        def on_download_progress(n: int, total: int, label: str) -> None:
-            phase, _ = split_hub_progress_label(label)
-            status = format_download_progress(n, total, phase)
-            sys.stderr.write(f"\r[orodruin] {status.replace(chr(10), ' | ')}    ")
+        progress_total = {"value": 0}
+        progress_n = {"value": 0}
+        rate_state = {"t": time.monotonic(), "n": 0, "bps": 0.0, "grew_at": time.monotonic()}
+
+        def emit_progress(n: int, total: int, phase: str) -> None:
+            if n > progress_n["value"]:
+                progress_n["value"] = n
+            shown_n = progress_n["value"]
+            shown_total = total if total >= 4097 else progress_total["value"]
+            if shown_total > progress_total["value"]:
+                progress_total["value"] = shown_total
+            shown_total = progress_total["value"]
+            now = time.monotonic()
+            dt = now - rate_state["t"]
+            dn = shown_n - rate_state["n"]
+            if dn > 0:
+                rate_state["grew_at"] = now
+                if dt >= 0.4:
+                    inst = dn / dt
+                    prev = rate_state["bps"]
+                    rate_state["bps"] = inst if prev <= 0 else (0.65 * prev + 0.35 * inst)
+                    rate_state["t"] = now
+                    rate_state["n"] = shown_n
+            elif now - rate_state["grew_at"] > 8.0:
+                rate_state["bps"] = 0.0
+            bps = float(rate_state["bps"])
+            status = format_download_progress(shown_n, shown_total, phase, bytes_per_s=bps)
+            sys.stderr.write(f"\r[sophon] {status.replace(chr(10), ' | ')}    ")
             sys.stderr.flush()
 
+        def on_expected_bytes(nbytes: int) -> None:
+            if nbytes > progress_total["value"]:
+                progress_total["value"] = nbytes
+            emit_progress(
+                scan_local_dir_download_bytes(model_dir),
+                progress_total["value"],
+                "Hub size known",
+            )
+
+        def on_download_progress(n: int, total: int, label: str) -> None:
+            phase, _ = split_hub_progress_label(label)
+            if is_file_count_progress(n, total, phase) or is_file_count_progress(n, total, label):
+                status = format_download_progress(n, total, phase)
+                sys.stderr.write(f"\r[sophon] {status.replace(chr(10), ' | ')}    ")
+                sys.stderr.flush()
+                return
+            if total >= 4097 and total > progress_total["value"]:
+                progress_total["value"] = total
+            emit_progress(n, progress_total["value"], phase)
+
+        def on_disk_bytes(nbytes: int) -> None:
+            emit_progress(nbytes, progress_total["value"], "on-disk download")
+
+        def on_hub_log(text: str) -> None:
+            hinted = parse_hub_size_hint(text)
+            if hinted > progress_total["value"]:
+                progress_total["value"] = hinted
+                emit_progress(progress_n["value"], hinted, "Hub size hint")
+            _emit(text)
+
         tqdm_class = hub_tqdm_bridge_factory(throttled_progress_callback(on_download_progress))
-        with capture_hub_download_logs(lambda text: _emit(text)):
-            with capture_hub_user_warnings(lambda text: _emit(f"(warning: {text})")):
-                path = download_preset_snapshot(
-                    preset_key,
-                    tqdm_class=tqdm_class,
-                    verbose=True,
-                    on_status=on_download_status,
-                )
+        with watch_local_download_bytes(model_dir, on_disk_bytes):
+            with capture_hub_download_logs(on_hub_log):
+                with capture_hub_user_warnings(lambda text: _emit(f"(warning: {text})")):
+                    path = download_preset_snapshot(
+                        preset_key,
+                        tqdm_class=tqdm_class,
+                        verbose=True,
+                        on_status=on_download_status,
+                        on_expected_bytes=on_expected_bytes,
+                    )
         sys.stderr.write("\n")
         sys.stderr.flush()
     except Exception as exc:
@@ -1087,44 +1759,78 @@ def _cmd_model_download(state: _SessionState, arg: str) -> bool:
 
 def _parse_finetune_command(
     arg: str,
-    default_preset: str | None,
-) -> tuple[str, str | None, list[str]]:
+) -> tuple[str | None, str | None, str | None, list[str]]:
     tokens = arg.split()
-    dataset_id = "gsm8k_instructions"
-    preset_key = default_preset
+    dataset_id: str | None = None
+    preset_key: str | None = None
+    recipe_path: str | None = None
+    overrides: list[str] = []
     idx = 0
-    if idx < len(tokens):
+    while idx < len(tokens):
+        token = tokens[idx]
+        lower = token.lower()
+        if lower == "on":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("usage: /finetune [DATASET] on PRESET [from PATH] [KEY=VAL ...]")
+            try:
+                matched_preset = match_preset_key(tokens[idx])
+            except ValueError:
+                matched_preset = None
+            preset_key = matched_preset or tokens[idx]
+            idx += 1
+            continue
+        if lower == "from":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("usage: /finetune from PATH")
+            recipe_path = tokens[idx]
+            idx += 1
+            continue
+        if "=" in token:
+            overrides.append(token)
+            idx += 1
+            continue
         from training.finetune.datasets.registry import match_dataset_preset
 
-        matched = match_dataset_preset(tokens[idx])
-        if matched is not None:
+        matched = match_dataset_preset(token)
+        if matched is not None and dataset_id is None:
             dataset_id = matched
             idx += 1
-    if idx < len(tokens) and tokens[idx].lower() == "on":
-        idx += 1
-        if idx < len(tokens):
-            try:
-                preset_key = match_preset_key(tokens[idx])
-            except ValueError:
-                preset_key = tokens[idx]
-            idx += 1
-    overrides = tokens[idx:]
-    return dataset_id, preset_key, overrides
+            continue
+        raise ValueError(f"unrecognized finetune token {token!r}")
+    return dataset_id, preset_key, recipe_path, overrides
 
 
 def _format_finetune_dataset_catalog() -> str:
+    from training.finetune.datasets.load import dataset_source_summary
     from training.finetune.datasets.registry import FINETUNE_DATASET_PRESETS, dataset_preset_keys_sorted
+    from utils.device.env_bootstrap import sophon_project_root
 
+    root = sophon_project_root()
     lines = ["finetune datasets:"]
     for key in dataset_preset_keys_sorted():
         preset = FINETUNE_DATASET_PRESETS[key]
-        lines.append(f"  {key}: hub={preset.hub_id} max_examples={preset.max_examples}")
+        lines.append(f"  {key}: {dataset_source_summary(preset, root)} max_examples={preset.max_examples}")
         lines.append(f"    {preset.description}")
     lines.append("")
-    lines.append("usage: /finetune [DATASET] [on PRESET] [KEY=VAL ...]")
-    lines.append("  default DATASET=gsm8k_instructions; PRESET=current selection")
-    lines.append("  overrides: max_examples=500 epochs=1 lr=2e-4 batch_size=2")
+    lines.append("usage: /finetune [DATASET] [on PRESET] [from PATH] [KEY=VAL ...]")
+    lines.append("  default DATASET=gsm8k_instructions unless `from PATH` supplies stages")
+    lines.append("  overrides: max_examples=500 epochs=1 lr=2e-4 batch_size=2 continue_from=NAME")
     return "\n".join(lines)
+
+
+def _record_train_progress(state: _SessionState, step: int, total: int, label: str) -> None:
+    if "loss=" in label:
+        try:
+            raw = label.split("loss=", 1)[1].split()[0]
+            state.train_loss_history.append(float(raw))
+        except (IndexError, ValueError):
+            pass
+    if total > 0:
+        _emit(f"train: {label} ({step}/{total})")
+    else:
+        _emit(f"train: {label}")
 
 
 def _reload_current_session_model(
@@ -1141,6 +1847,16 @@ def _reload_current_session_model(
     _emit("(no model selected; use /model PRESET first)")
 
 
+@_register(
+    "trainer",
+    "Trainer mode: /trainer | use | select | data get KEY | run [full] | watch | stop.",
+)
+def _cmd_trainer(state: _SessionState, arg: str) -> bool:
+    from cli.trainer_commands import handle_trainer
+
+    return handle_trainer(state, arg)
+
+
 @_register("finetune-datasets", "List finetune dataset presets.")
 def _cmd_finetune_datasets(state: _SessionState, _arg: str) -> bool:
     _ = state
@@ -1148,36 +1864,44 @@ def _cmd_finetune_datasets(state: _SessionState, _arg: str) -> bool:
     return False
 
 
-@_register("finetune", "LoRA finetune current preset: /finetune [DATASET] [on PRESET] [KEY=VAL ...].")
+@_register(
+    "finetune",
+    "LoRA finetune: /finetune [DATASET] [on PRESET] [from PATH] [KEY=VAL ...].",
+)
 def _cmd_finetune(state: _SessionState, arg: str) -> bool:
-    dataset_id, preset_key, overrides = _parse_finetune_command(arg, state.preset_key)
-    if not preset_key:
-        _emit("usage: /finetune [DATASET] on PRESET [KEY=VAL ...]  (or select a preset first)")
+    try:
+        dataset_id, preset_key, recipe_path, overrides = _parse_finetune_command(arg)
+    except ValueError as exc:
+        _emit(str(exc))
+        return False
+    if preset_key is None and not recipe_path:
+        preset_key = state.preset_key
+    if not preset_key and not recipe_path:
+        _emit("usage: /finetune [DATASET] on PRESET [from PATH] [KEY=VAL ...]  (or select a preset first)")
         return False
 
     from training.finetune.job import run_finetune_job
 
     _unload_model_weights(state)
     state.finetune_running = True
+    state.train_loss_history = []
     try:
-        _emit(f"starting finetune preset={preset_key!r} dataset={dataset_id!r} ...")
+        _emit(
+            f"starting finetune preset={preset_key!r} dataset={dataset_id!r} "
+            f"from={recipe_path or '-'}"
+        )
 
         def on_log(msg: str) -> None:
             _emit(msg)
-
-        def on_progress(step: int, total: int, label: str) -> None:
-            if total > 0:
-                _emit(f"train: {label} ({step}/{total})")
-            else:
-                _emit(f"train: {label}")
 
         result = run_finetune_job(
             preset_key,
             dataset_id,
             project_root=state.project_root,
             backend_id="auto",
+            recipe_path=recipe_path,
             recipe_override_tokens=overrides,
-            on_progress=on_progress,
+            on_progress=lambda step, total, label: _record_train_progress(state, step, total, label),
             on_log=on_log,
         )
     except Exception as exc:
@@ -1186,37 +1910,87 @@ def _cmd_finetune(state: _SessionState, arg: str) -> bool:
     finally:
         state.finetune_running = False
 
-    state.preset_key = preset_key
+    state.preset_key = result.meta.preset_key
     state.last_finetune_run_dir = result.run_dir
+    state.last_finetune_adapter_name = result.adapter_name
     state.adapter_path = str(result.adapter_dir.resolve())
     _emit(f"(finetune done; adapter at {result.adapter_dir})")
-    _emit(f"(backend={result.backend_id}; run /adapter load to chat with the adapter)")
+    load_name = result.adapter_name or str(result.adapter_dir)
+    _emit(f"(backend={result.backend_id}; /adapter load {load_name})")
     return False
 
 
-@_register("finetune-status", "Show last finetune run summary.")
-def _cmd_finetune_status(state: _SessionState, _arg: str) -> bool:
+@_register("finetune-config", "Print the resolved finetune recipe. /finetune-config [from PATH] [KEY=VAL ...].")
+def _cmd_finetune_config(state: _SessionState, arg: str) -> bool:
+    try:
+        dataset_id, preset_key, recipe_path, overrides = _parse_finetune_command(arg)
+    except ValueError as exc:
+        _emit(str(exc))
+        return False
+    if preset_key is None and not recipe_path:
+        preset_key = state.preset_key
+    from training.finetune.recipe import recipe_to_mapping, resolve_finetune_recipe
+    import yaml
+
+    recipe = resolve_finetune_recipe(
+        project_root=state.project_root,
+        dataset_id=dataset_id,
+        preset_key=preset_key,
+        recipe_path=recipe_path,
+        override_tokens=overrides,
+    )
+    path = recipe.recipe_path or str(state.project_root / "config" / "finetune" / "default.yaml")
+    _emit(f"recipe file: {path}")
+    _emit(yaml.safe_dump(recipe_to_mapping(recipe), sort_keys=False).rstrip())
+    return False
+
+
+@_register("finetune-status", "Show last finetune run summary. /finetune-status [NAME] [curves].")
+def _cmd_finetune_status(state: _SessionState, arg: str) -> bool:
+    from training.common.curves import losses_from_metrics_jsonl, sparkline
+    from training.common.index import resolve_adapter_entry
+    from training.common.types import RunMeta
+
+    parts = arg.split()
+    want_curves = any(p.lower() == "curves" for p in parts)
+    name_parts = [p for p in parts if p.lower() != "curves"]
     run_dir = state.last_finetune_run_dir
+    adapter_name = state.last_finetune_adapter_name
+    if name_parts:
+        entry = resolve_adapter_entry(name_parts[0], project_root=state.project_root)
+        if entry is None:
+            _emit(f"(adapter not found: {name_parts[0]})")
+            return False
+        run_dir = Path(entry.path)
+        adapter_name = entry.name
     if run_dir is None:
-        _emit("(no finetune run in this session)")
+        _emit("(no finetune run in this session; pass NAME or /adapter list)")
         return False
     meta_path = run_dir / "run_meta.json"
     if not meta_path.is_file():
         _emit(f"(run dir exists but no run_meta.json: {run_dir})")
         return False
-    from training.common.types import RunMeta
-
     meta = RunMeta.read_json(meta_path)
     _emit(f"run_dir: {run_dir}")
+    if adapter_name or meta.adapter_name:
+        _emit(f"name: {adapter_name or meta.adapter_name}")
     _emit(f"preset: {meta.preset_key}  dataset: {meta.dataset_id}  backend: {meta.backend_id}")
+    if meta.stage_id:
+        _emit(f"stage: {meta.stage_id}  parent: {meta.parent_adapter or '-'}")
     if meta.train_metrics:
         _emit(f"train_metrics: {meta.train_metrics}")
     if state.adapter_path:
         _emit(f"adapter_path: {state.adapter_path}")
+    losses = losses_from_metrics_jsonl(run_dir / "metrics.jsonl")
+    if losses:
+        _emit(f"last_loss: {losses[-1]:.4f}  steps_logged: {len(losses)}")
+        _emit(f"curve: {sparkline(losses)}")
+    elif want_curves:
+        _emit("(no metrics.jsonl losses to plot)")
     return False
 
 
-@_register("adapter", "LoRA adapter: /adapter show | load [PATH] | clear.")
+@_register("adapter", "LoRA adapter: /adapter show | list | load [NAME|PATH] | clear.")
 def _cmd_adapter(state: _SessionState, arg: str) -> bool:
     tokens = arg.strip().split(maxsplit=1)
     action = tokens[0].lower() if tokens else "show"
@@ -1229,6 +2003,21 @@ def _cmd_adapter(state: _SessionState, arg: str) -> bool:
             _emit("adapter_path = (none)")
         if state.last_finetune_run_dir is not None:
             _emit(f"last_finetune_run_dir = {state.last_finetune_run_dir}")
+        if state.last_finetune_adapter_name:
+            _emit(f"last_adapter_name = {state.last_finetune_adapter_name}")
+        return False
+
+    if action == "list":
+        from training.common.index import load_adapter_index
+
+        entries = load_adapter_index(state.project_root).entries
+        if not entries:
+            _emit("no adapters in data/training/adapters/index.json")
+            return False
+        for entry in entries:
+            loss = f" loss={entry.last_loss:.4f}" if entry.last_loss is not None else ""
+            _emit(f"  {entry.name}: {entry.preset} / {entry.dataset} {entry.created}{loss}")
+            _emit(f"    {entry.path}")
         return False
 
     if action == "clear":
@@ -1240,26 +2029,34 @@ def _cmd_adapter(state: _SessionState, arg: str) -> bool:
         return False
 
     if action == "load":
+        from training.common.index import resolve_adapter_entry
+
+        target_preset = state.preset_key
         if rest:
-            candidate = Path(rest).expanduser()
-            if not candidate.is_dir():
-                _emit(f"adapter path not found: {candidate}")
+            entry = resolve_adapter_entry(rest, project_root=state.project_root)
+            if entry is None:
+                _emit(f"adapter not found: {rest}")
                 return False
-            state.adapter_path = str(candidate.resolve())
+            state.adapter_path = entry.path
+            if entry.preset:
+                target_preset = entry.preset
         elif state.adapter_path:
             pass
         elif state.last_finetune_run_dir is not None:
             state.adapter_path = str(state.last_finetune_run_dir.resolve())
         else:
-            _emit("usage: /adapter load [PATH]  (or run /finetune first)")
+            _emit("usage: /adapter load [NAME|PATH]  (or run /finetune first)")
             return False
-        if not state.preset_key and not state.model_path.strip():
+        if not target_preset and not state.model_path.strip():
             _emit(f"(adapter set to {state.adapter_path}; use /model PRESET to load)")
+            return False
+        if target_preset and target_preset != state.preset_key:
+            switch_session_model(state, target_preset)
             return False
         _reload_current_session_model(state)
         return False
 
-    _emit("usage: /adapter show | load [PATH] | clear")
+    _emit("usage: /adapter show | list | load [NAME|PATH] | clear")
     return False
 
 
@@ -1273,7 +2070,61 @@ def _cmd_quit(state: _SessionState, _arg: str) -> bool:
 def _cmd_reset(state: _SessionState, _arg: str) -> bool:
     state.messages = _baseline_messages(state.system_text)
     state._last_persisted_user_obj_id = 0
+    _wipe_transcript_ui()
     _emit("(conversation cleared)")
+    return False
+
+
+@_register("log", "Show session log path and tail. /log path | /log [N].", aliases=("logs",))
+def _cmd_log(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from cli.host.session_log import resolve_session_log_path
+    from utils.device.platform import to_linux_display_path
+
+    path = resolve_session_log_path()
+    display = to_linux_display_path(path)
+    token = arg.strip()
+    parts = token.split()
+    if token.lower() in ("path", "where"):
+        _emit(display)
+        return False
+    n = 80
+    rest = token
+    if parts and parts[0].lower() in ("tail", "head"):
+        rest = " ".join(parts[1:])
+    if rest.strip():
+        try:
+            n = int(rest.strip())
+        except ValueError:
+            _emit("usage: /log [path | N | tail N]")
+            return False
+    n = max(1, min(n, 200))
+    _emit(f"log {display}")
+    if not path.is_file():
+        _emit("(log file not found)")
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    tail = lines[-n:]
+    if not tail:
+        _emit("(empty)")
+        return False
+    _emit("\n".join(tail))
+    return False
+
+
+@_register("clear", "Empty the visible chat and start a new transcript. Durable memory stays.")
+def _cmd_clear(state: _SessionState, _arg: str) -> bool:
+    new_id = _dt.datetime.now().strftime("session_%Y%m%d_%H%M%S")
+    if state.memory_layer is not None:
+        scope = state.memory_layer.rotate_session(new_id)
+        state.memory_scope = scope
+    elif state.memory_scope is not None:
+        state.memory_scope = MemoryScope(session_id=new_id, user_id=state.memory_scope.user_id)
+    state.messages = _baseline_messages(state.system_text)
+    state._last_persisted_user_obj_id = 0
+    _wipe_transcript_ui()
+    _emit(f"(chat cleared, session={new_id})")
     return False
 
 
@@ -1282,7 +2133,7 @@ def _cmd_save(state: _SessionState, arg: str) -> bool:
     target = arg.strip()
     if not target:
         ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        target = str(orodruin_chat_logs_dir() / f"{ts}.txt")
+        target = str(sophon_chat_logs_dir() / f"{ts}.txt")
     p = Path(target).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
@@ -1377,10 +2228,38 @@ def _cmd_system(state: _SessionState, arg: str) -> bool:
 
 @_register("rag-status", "Show retrieval backend + last query metrics.")
 def _cmd_rag_status(state: _SessionState, _arg: str) -> bool:
-    if state.retriever is None:
-        _emit("retrieval: disabled (--rag leann --rag-index PATH)")
+    if state.retriever is None and state.structure_retriever is None:
+        from processing.text.retrieval.corpus import default_index_exists, default_leann_index_path
+
+        default_path = default_leann_index_path()
+        if default_index_exists(default_path):
+            _emit(
+                f"retrieval: disabled in this session, but default index exists at {default_path}. "
+                "Restart chat (or /rag-index) to bind it, or pass --rag leann."
+            )
+        else:
+            _emit(
+                "retrieval: disabled (no index). "
+                "Set SOPHON_VAULT_PATH then run /rag-index --rebuild "
+                f"(writes {default_path}). Obsidian tools are separate from RAG."
+            )
         return False
-    _emit(f"retrieval: backend={state.retriever.backend_id()} top_k={state.retrieval_top_k}")
+    primary = state.retriever.backend_id() if state.retriever is not None else "none"
+    structure = (
+        state.structure_retriever.backend_id() if state.structure_retriever is not None else "none"
+    )
+    _emit(
+        f"retrieval: backend={primary} structure={structure} "
+        f"adaptive={'on' if state.rag_adaptive else 'off'} top_k={state.retrieval_top_k}"
+    )
+    decision = state.last_retrieval_decision
+    if isinstance(decision, dict) and decision:
+        _emit(
+            f"last decision: {decision.get('decision')} "
+            f"(reason={decision.get('reason')})"
+        )
+    else:
+        _emit("last decision: (none yet)")
     last = state.last_retrieval_metrics
     if isinstance(last, dict) and last:
         from processing.text.retrieval.metrics import RetrievalQueryMetrics, format_query_metrics
@@ -1437,10 +2316,11 @@ def _cmd_rag_status(state: _SessionState, _arg: str) -> bool:
 
 @_register(
     "rag-probe",
-    "Estimate LEANN query cost: /rag-probe [N] [query text]. Uses last user turn if query omitted.",
+    "Estimate retrieval query cost: /rag-probe [N] [query text]. Uses last user turn if query omitted.",
 )
 def _cmd_rag_probe(state: _SessionState, arg: str) -> bool:
-    if state.retriever is None:
+    active = state.retriever or state.structure_retriever
+    if active is None:
         _emit("retrieval disabled — set --rag leann --rag-index PATH first")
         return False
     from processing.text.retrieval.metrics import (
@@ -1463,14 +2343,17 @@ def _cmd_rag_probe(state: _SessionState, arg: str) -> bool:
         _emit("usage: /rag-probe [N] <query>   (or run after a user turn)")
         return False
     repeats = min(repeats, 50)
-    _emit(f"(rag-probe n={repeats} top_k={state.retrieval_top_k} query_chars={len(query)})")
+    _emit(
+        f"(rag-probe backend={active.backend_id()} n={repeats} "
+        f"top_k={state.retrieval_top_k} query_chars={len(query)})"
+    )
     rows: list[RetrievalQueryMetrics] = []
     for i in range(repeats):
         try:
             import time
 
             t0 = time.perf_counter()
-            result = state.retriever.retrieve(
+            result = active.retrieve(
                 RetrievalQuery(text=query, params={"top_k": state.retrieval_top_k}),
             )
             latency = time.perf_counter() - t0
@@ -1485,7 +2368,7 @@ def _cmd_rag_probe(state: _SessionState, arg: str) -> bool:
                     mean_score=raw.get("mean_score"),
                     min_score=raw.get("min_score"),
                     score_margin=raw.get("score_margin"),
-                    backend_id=str(raw.get("backend_id") or state.retriever.backend_id()),
+                    backend_id=str(raw.get("backend_id") or active.backend_id()),
                     extras=dict(raw.get("extras") or {}),
                 )
             else:
@@ -1494,7 +2377,7 @@ def _cmd_rag_probe(state: _SessionState, arg: str) -> bool:
                     chunks=list(result.chunks),
                     top_k=state.retrieval_top_k,
                     query_chars=len(query),
-                    backend_id=state.retriever.backend_id(),
+                    backend_id=active.backend_id(),
                 )
                 result.extras["metrics"] = metrics.as_dict()
             rows.append(metrics)
@@ -1518,6 +2401,158 @@ def _cmd_rag_probe(state: _SessionState, arg: str) -> bool:
     return False
 
 
+@_register("rag-index", "Build default vault+project LEANN corpus: /rag-index [--rebuild].")
+def _cmd_rag_index(state: _SessionState, arg: str) -> bool:
+    from processing.text.retrieval.corpus import build_default_corpus
+
+    tokens = arg.split()
+    rebuild = any(t in ("--rebuild", "rebuild") for t in tokens)
+    _emit(f"(rag-index starting rebuild={rebuild})...")
+    try:
+        result = build_default_corpus(
+            rebuild=rebuild,
+            on_progress=lambda msg: _emit(f"[rag-index] {msg}"),
+        )
+    except Exception as exc:
+        _emit(f"(rag-index failed: {exc})")
+        return False
+    _emit(
+        f"(rag-index done index={result.index_path} files={result.n_files} "
+        f"chunks={result.n_chunks})"
+    )
+    for line in result.messages:
+        _emit(line)
+    if state.retriever is None:
+        try:
+            from processing.text.retrieval import load_rag_retriever
+
+            candidate = load_rag_retriever("leann", native_index_path=result.index_path)
+            if candidate.backend_id() != "noop":
+                state.retriever = candidate
+                _emit(f"(retrieval enabled backend={candidate.backend_id()})")
+        except Exception as exc:
+            _emit(f"(retrieval re-init failed: {exc})")
+    return False
+
+
+@_register("eval", "Benchmarks: /eval | /eval model [task] [N] | /eval rag [N] | /eval train.")
+def _cmd_eval(state: _SessionState, arg: str) -> bool:
+    from cli.eval_commands import (
+        available_model_tasks,
+        format_eval_help,
+        format_train_index_lines,
+        run_model_eval,
+        run_rag_eval,
+        summarize_task_result,
+    )
+
+    parts = arg.split()
+    if not parts:
+        _emit(format_eval_help())
+        tasks = available_model_tasks()
+        if tasks:
+            _emit(f"available tasks: {', '.join(tasks)}")
+        if state.last_eval_summary:
+            _emit(f"last eval: {state.last_eval_summary}")
+        return False
+
+    suite = parts[0].lower()
+    if suite == "train":
+        for line in format_train_index_lines():
+            _emit(line)
+        _emit("use /finetune to start training; /adapter load NAME to attach a LoRA")
+        return False
+
+    if state.eval_running or state.finetune_running:
+        _emit("(eval/finetune already running)")
+        return False
+
+    from backend.chat_resolve import is_server_backend
+
+    if is_server_backend(state.backend_id):
+        backend = state.backend_id
+        server_model = state.server_model
+        model_path = None
+        preset_key = None
+    else:
+        backend = "hf"
+        server_model = None
+        model_path = state.model_path or None
+        preset_key = state.preset_key
+    quantization = state.quantization or "none"
+
+    if suite == "model":
+        task_id = "hellaswag"
+        limit: int | None = None
+        if len(parts) >= 2 and not parts[1].isdigit():
+            task_id = parts[1]
+            if len(parts) >= 3 and parts[2].isdigit():
+                limit = int(parts[2])
+        elif len(parts) >= 2 and parts[1].isdigit():
+            limit = int(parts[1])
+        state.eval_running = True
+        try:
+            result = run_model_eval(
+                task_id=task_id,
+                limit=limit,
+                backend=backend,
+                model_path=model_path,
+                preset_key=preset_key,
+                quantization=quantization,
+                server_model=server_model,
+                on_emit=_emit,
+            )
+            state.last_eval_summary = summarize_task_result(result)
+            _emit(
+                f"(eval model done task={result.task_id} acc={result.accuracy:.3f} "
+                f"n={result.total} out={result.summary_path})"
+            )
+        except Exception as exc:
+            _emit(f"(eval model failed: {exc})")
+        finally:
+            state.eval_running = False
+        return False
+
+    if suite == "rag":
+        limit = 20
+        if len(parts) >= 2 and parts[1].isdigit():
+            limit = int(parts[1])
+        state.eval_running = True
+        try:
+            result = run_rag_eval(
+                limit=limit,
+                backend=backend,
+                model_path=model_path,
+                preset_key=preset_key,
+                quantization=quantization,
+                server_model=server_model,
+                on_emit=_emit,
+            )
+            state.last_eval_summary = summarize_task_result(result)
+            extra = ""
+            try:
+                import json
+
+                summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+                extra = (
+                    f" acc_off={float(summary.get('accuracy_no_rag') or 0):.3f} "
+                    f"acc_on={float(summary.get('accuracy_with_rag') or 0):.3f} "
+                    f"hit_rate={float(summary.get('retrieval_hit_rate') or 0):.3f}"
+                )
+            except Exception:
+                pass
+            _emit(f"(eval rag done n={result.total}{extra} out={result.summary_path})")
+        except Exception as exc:
+            _emit(f"(eval rag failed: {exc})")
+        finally:
+            state.eval_running = False
+        return False
+
+    _emit(f"unknown eval suite {suite!r}")
+    _emit(format_eval_help())
+    return False
+
+
 @_register("obsidian-status", "Show Obsidian Local REST API tool status.")
 def _cmd_obsidian_status(state: _SessionState, _arg: str) -> bool:
     _ = state
@@ -1531,11 +2566,11 @@ def _cmd_obsidian_status(state: _SessionState, _arg: str) -> bool:
     enabled = obsidian_tools_enabled()
     url = obsidian_api_url()
     key = obsidian_api_key()
-    _emit(f"obsidian tools: {'on' if enabled else 'off'} (ORODRUIN_OBSIDIAN_TOOLS)")
+    _emit(f"obsidian tools: {'on' if enabled else 'off'} (SOPHON_OBSIDIAN_TOOLS)")
     _emit(f"api url: {url}")
     _emit(f"api key: {'set' if key else 'missing'}")
     if not enabled:
-        _emit("enable with ORODRUIN_OBSIDIAN_TOOLS=1 and restart chat")
+        _emit("enable with SOPHON_OBSIDIAN_TOOLS=1 and restart chat")
         return False
     try:
         info = ObsidianClient(timeout_s=5.0).ping()
@@ -1545,11 +2580,218 @@ def _cmd_obsidian_status(state: _SessionState, _arg: str) -> bool:
     return False
 
 
-@_register("tools", "Show enabled chat tools (speak / vault / shell).")
-@_register("mode", "Alias for /tools (tool packs are unified).")
+@_register("zotero-status", "Show Zotero local API / sqlite tool status.")
+def _cmd_zotero_status(state: _SessionState, _arg: str) -> bool:
+    _ = state
+    from integrations.zotero.client import (
+        ZoteroClient,
+        zotero_api_url,
+        zotero_db_path,
+        zotero_tools_enabled,
+    )
+
+    enabled = zotero_tools_enabled()
+    ping = ZoteroClient().ping()
+    _emit(f"zotero tools: {'on' if enabled else 'off'} (SOPHON_ZOTERO_TOOLS, default on if library is reachable)")
+    _emit(f"api url: {zotero_api_url()}")
+    db = zotero_db_path()
+    _emit(f"sqlite: {db if db is not None else 'missing'}")
+    _emit(f"backend: {ping.get('backend')} ok={ping.get('ok')}")
+    if ping.get("error"):
+        _emit(f"error: {ping.get('error')}")
+    if not enabled:
+        _emit("set SOPHON_ZOTERO_TOOLS=1 or keep the library reachable. SOPHON_ZOTERO_TOOLS=0 disables.")
+    _emit("slash: /zotero-tree /zotero-search QUERY /zotero-metrics /zotero-read KEY")
+    return False
+
+
+@_register("zotero-tree", "Print Zotero collection folders. /zotero-tree [collection] [depth].")
+def _cmd_zotero_tree(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from integrations.zotero.client import ZoteroClient, format_tool_payload
+
+    parts = [bit for bit in arg.split() if bit]
+    depth = 2
+    collection = ""
+    if parts and parts[-1].isdigit():
+        depth = int(parts[-1])
+        parts = parts[:-1]
+    if parts:
+        collection = " ".join(parts)
+    payload = ZoteroClient().format_tree(collection=collection, depth=depth)
+    _emit(format_tool_payload(payload))
+    return False
+
+
+@_register("zotero-search", "Search Zotero titles, authors, keys, and indexed PDFs. /zotero-search QUERY")
+def _cmd_zotero_search(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from integrations.zotero.client import ZoteroClient, format_tool_payload
+
+    query = arg.strip()
+    if not query:
+        _emit("usage: /zotero-search QUERY")
+        return False
+    payload = ZoteroClient().search_items(query, limit=20)
+    _emit(format_tool_payload(payload))
+    return False
+
+
+@_register("zotero-metrics", "Local Zotero citation coverage: counts, types, years, DOIs, citekeys.")
+def _cmd_zotero_metrics(state: _SessionState, _arg: str) -> bool:
+    _ = state
+    from integrations.zotero.client import ZoteroClient, format_tool_payload
+
+    _emit(format_tool_payload(ZoteroClient().library_metrics()))
+    return False
+
+
+@_register("zotero-read", "Read one Zotero item. /zotero-read KEY|TITLE [--pdf]")
+def _cmd_zotero_read(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from integrations.zotero.client import ZoteroClient
+
+    raw = arg.strip()
+    include_pdf = False
+    if raw.endswith("--pdf"):
+        include_pdf = True
+        raw = raw[: -len("--pdf")].strip()
+    if not raw:
+        _emit("usage: /zotero-read KEY|TITLE [--pdf]")
+        return False
+    _emit(ZoteroClient().item_record(raw, include_pdf_text=include_pdf))
+    return False
+
+
+@_register("google-status", "Show Google OAuth / bookmarks / SearXNG / Custom Search status.")
+def _cmd_google_status(state: _SessionState, _arg: str) -> bool:
+    _ = state
+    from integrations.google.bookmarks import bookmarks_available, bookmarks_path
+    from integrations.google.oauth import format_accounts_status, google_tools_enabled
+    from integrations.google.paths import client_secrets_path
+    from integrations.google.search import cse_configured, web_search_tools_enabled
+    from integrations.google.searxng import searxng_base_url, searxng_configured
+
+    status = format_accounts_status()
+    _emit(f"google tools: {'on' if google_tools_enabled() else 'off'} (SOPHON_GOOGLE_TOOLS)")
+    _emit(f"client secrets: {client_secrets_path() or 'missing'}")
+    _emit(f"accounts: {', '.join(status['accounts']) if status['accounts'] else '(none)'}")
+    _emit(f"active: {status['active'] or '(none)'}")
+    _emit(f"bookmarks: {bookmarks_path() if bookmarks_available() else 'missing'} (SOPHON_BOOKMARKS_PATH)")
+    searx_url = searxng_base_url() or "-"
+    _emit(
+        f"web search: {'on' if web_search_tools_enabled() else 'off'} "
+        f"(searxng={'yes' if searxng_configured() else 'no'} url={searx_url} "
+        f"cse={'yes' if cse_configured() else 'no'} "
+        f"SOPHON_SEARXNG_URL / SOPHON_GOOGLE_CSE_KEY / SOPHON_GOOGLE_CSE_CX)"
+    )
+    return False
+
+
+@_register("overleaf-status", "Show Overleaf Git token / project tool status.")
+def _cmd_overleaf_status(state: _SessionState, _arg: str) -> bool:
+    _ = state
+    from integrations.overleaf.client import (
+        configured_project_ids,
+        overleaf_available,
+        overleaf_git_token,
+        overleaf_tools_enabled,
+        ping,
+    )
+
+    enabled = overleaf_tools_enabled()
+    status = ping()
+    _emit(f"overleaf tools: {'on' if enabled else 'off'} (SOPHON_OVERLEAF_TOOLS)")
+    _emit(f"token: {'set' if overleaf_git_token() else 'missing'} (SOPHON_OVERLEAF_GIT_TOKEN)")
+    ids = configured_project_ids()
+    _emit(f"projects: {', '.join(ids) if ids else '(none)'}")
+    aliases = status.get("aliases") or {}
+    if aliases:
+        bits = [f"{alias}={pid}" for alias, pid in aliases.items()]
+        _emit(f"aliases: {', '.join(bits)}")
+    _emit(f"available: {'yes' if overleaf_available() else 'no'}")
+    _emit(f"cache: {status.get('cache')}")
+    if not enabled:
+        _emit(
+            "enable with SOPHON_OVERLEAF_TOOLS=1 plus SOPHON_OVERLEAF_GIT_TOKEN "
+            "and SOPHON_OVERLEAF_PROJECT_ID (or PROJECT_IDS / data/overleaf/projects.json)."
+        )
+    _emit("slash: /overleaf-list [project_id] [path] /overleaf-read project_id path")
+    return False
+
+
+@_register("overleaf-list", "List Overleaf projects or files. /overleaf-list [project_id] [path].")
+def _cmd_overleaf_list(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from integrations.overleaf.client import format_tool_payload, list_files, list_projects
+
+    parts = [bit for bit in arg.split() if bit]
+    if not parts:
+        rows = [
+            {
+                "project_id": project.project_id,
+                "alias": project.alias,
+                "path": str(project.path),
+                "sync_error": project.sync_error,
+            }
+            for project in list_projects()
+        ]
+        _emit(format_tool_payload({"projects": rows}))
+        return False
+    project_id = parts[0]
+    path = " ".join(parts[1:]) if len(parts) > 1 else ""
+    try:
+        entries = list_files(project_id, path)
+    except Exception as exc:
+        _emit(f"error: {exc}")
+        return False
+    _emit(
+        format_tool_payload(
+            {
+                "project_id": project_id,
+                "path": path or "/",
+                "entries": [
+                    {
+                        "name": entry.name,
+                        "path": entry.relpath,
+                        "kind": "dir" if entry.is_dir else "file",
+                    }
+                    for entry in entries
+                ],
+            }
+        )
+    )
+    return False
+
+
+@_register("overleaf-read", "Read an Overleaf file. /overleaf-read PROJECT_ID PATH")
+def _cmd_overleaf_read(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from integrations.overleaf.client import read_file
+
+    parts = [bit for bit in arg.split() if bit]
+    if len(parts) < 2:
+        _emit("usage: /overleaf-read PROJECT_ID PATH")
+        return False
+    project_id = parts[0]
+    path = " ".join(parts[1:])
+    try:
+        _emit(read_file(project_id, path, truncate=True))
+    except Exception as exc:
+        _emit(f"error: {exc}")
+    return False
+
+
+@_register("tools", "Show enabled chat tools (speak / vault / zotero / google / overleaf / shell / editor / subagent).")
 def _cmd_tools(state: _SessionState, _arg: str) -> bool:
+    from cli.code_assist import editor_tools_enabled
+    from integrations.google.bookmarks import bookmarks_available
+    from integrations.google.oauth import active_email, google_tools_enabled, list_accounts
+    from integrations.google.search import web_search_tools_enabled
     from integrations.obsidian.client import obsidian_tools_enabled
+    from integrations.overleaf.client import overleaf_tools_enabled
     from integrations.shell.runner import ShellSession, shell_tools_enabled
+    from integrations.zotero.client import zotero_tools_enabled
     from utils.device.env_bootstrap import DOTENV_LOAD_PATH
 
     if state.shell_session is None:
@@ -1560,12 +2802,36 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
     tts_on = _tts_tools_enabled()
     sst_on = _sst_tools_enabled()
     obs_on = obsidian_tools_enabled()
+    zot_on = zotero_tools_enabled()
+    google_on = _google_tools_wanted()
+    overleaf_on = overleaf_tools_enabled()
     shell_on = shell_tools_enabled()
+    editor_on = editor_tools_enabled()
+    memory_on = state.memory_layer is not None and _memory_tools_wanted()
+    skill_on = state.skill_catalog is not None and _skill_tools_wanted()
+    spawn_on = _spawn_tools_in_schema(state)
     _emit(f"dotenv: {DOTENV_LOAD_PATH if DOTENV_LOAD_PATH else '(not loaded)'}")
-    _emit(f"speak tool: {'on' if tts_on else 'off'} (ORODRUIN_TTS_TOOL)")
-    _emit(f"transcribe tool: {'on' if sst_on else 'off'} (ORODRUIN_SST_TOOL)")
-    _emit(f"vault tools: {'on' if obs_on else 'off'} (ORODRUIN_OBSIDIAN_TOOLS)")
-    _emit(f"shell tools: {'on' if shell_on else 'off'} (ORODRUIN_SHELL_TOOLS)")
+    _emit(f"speak tool: {'on' if tts_on else 'off'} (SOPHON_TTS_TOOL)")
+    _emit(f"transcribe tool: {'on' if sst_on else 'off'} (SOPHON_SST_TOOL)")
+    _emit(f"vault tools: {'on' if obs_on else 'off'} (SOPHON_OBSIDIAN_TOOLS)")
+    _emit(f"zotero tools: {'on' if zot_on else 'off'} (SOPHON_ZOTERO_TOOLS, default on if library reachable)")
+    _emit(
+        f"google tools: {'on' if google_on else 'off'} "
+        f"(accounts={len(list_accounts())} active={active_email() or '-'} "
+        f"bookmarks={'yes' if bookmarks_available() else 'no'} "
+        f"search={'yes' if web_search_tools_enabled() else 'no'} SOPHON_GOOGLE_TOOLS / SOPHON_WEB_SEARCH_TOOLS / SOPHON_SEARXNG_URL)"
+    )
+    _emit(f"overleaf tools: {'on' if overleaf_on else 'off'} (SOPHON_OVERLEAF_TOOLS)")
+    _emit(f"shell tools: {'on' if shell_on else 'off'} (SOPHON_SHELL_TOOLS)")
+    _emit(f"editor tools: {'on' if editor_on else 'off'} (SOPHON_EDITOR_TOOLS)")
+    from harness import ensure_harness
+
+    harness = ensure_harness(state)
+    _emit(f"harness mode: {harness.mode} (/mode plan|chat|agent)")
+    _emit(f"harness workspace: {harness.workspace_path()}")
+    _emit(f"memory tools: {'on' if memory_on else 'off'} (SOPHON_MEMORY_TOOLS)")
+    _emit(f"skill tools: {'on' if skill_on else 'off'} (SOPHON_SKILL_TOOLS)")
+    _emit(f"subagent tools: {'on' if spawn_on else 'off'} (SOPHON_SUBAGENT_TOOLS, omitted in plan/chat)")
     _emit(f"shell cwd: {session.cwd}")
     _emit(f"tool rounds: {_format_tool_max_rounds(state.tool_max_rounds)} (/tool-rounds, /unlimited)")
     if tts_on:
@@ -1574,19 +2840,147 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
         _emit("sst: transcribe")
     if obs_on:
         _emit("vault: vault_search, vault_list, vault_read, vault_recent")
+    if zot_on:
+        _emit("zotero: zotero_tree, zotero_search, zotero_list, zotero_read, zotero_metrics")
+    if google_on:
+        bits: list[str] = []
+        if google_tools_enabled() and list_accounts():
+            bits.extend(["gmail_search", "gmail_read", "drive_tree", "drive_list"])
+        if bookmarks_available():
+            bits.append("bookmarks_tree")
+        if web_search_tools_enabled():
+            bits.append("web_search")
+        _emit(f"google: {', '.join(bits) if bits else '(none)'}")
+    if overleaf_on:
+        _emit(
+            "overleaf: overleaf_list_projects, overleaf_list, overleaf_read, overleaf_sections"
+        )
     if shell_on:
         _emit("shell: shell_pwd, shell_cd, shell_ls, shell_read, shell_exec")
-    if not obs_on and not shell_on and not tts_on and not sst_on:
+    if editor_on:
+        _emit("editor: editor_read, editor_propose_edit, editor_status")
+        _emit("review: /assist status | accept | decline | undo | redo")
+    if memory_on:
+        _emit("memory: memory_view, memory_search, memory_read, memory_write, memory_propose")
+    if skill_on:
+        _emit("skills: skill_list, skill_read, skill_read_file")
+    if spawn_on:
+        _emit("subagent: subagent, subagent_fork")
+    if (
+        not obs_on
+        and not zot_on
+        and not google_on
+        and not overleaf_on
+        and not shell_on
+        and not tts_on
+        and not sst_on
+        and not editor_on
+        and not memory_on
+        and not skill_on
+        and not spawn_on
+    ):
         _emit("no chat tools enabled; set env flags in .env and restart")
     else:
-        _emit("all enabled tool packs are available together (no mode switch)")
+        _emit("all enabled tool packs are available together (no tool-pack mode switch)")
+        _emit("harness /mode plan denies shell_exec and proposes; /permissions lists rules")
     return False
 
 
-@_register("memory-status", "Show memory store and session info.")
+@_register("subagents", "Last in-process subagent run (id, provider, depth, stop, output).")
+def _cmd_subagents(state: _SessionState, _arg: str) -> bool:
+    run = getattr(state, "last_subagent_run", None)
+    if run is None:
+        _emit("no subagent runs in this session")
+        return False
+    result = getattr(run, "result", None)
+    output = str(getattr(result, "output", "") or "")
+    if len(output) > 400:
+        output = output[:399] + "…"
+    stop = str(getattr(result, "stop_reason", "") or "")
+    diag = str(getattr(result, "diagnostic", "") or "")
+    _emit(f"id: {getattr(run, 'id', '')}")
+    _emit(f"provider: {getattr(run, 'provider', '')}")
+    _emit(f"depth: {getattr(run, 'depth', '')}")
+    _emit(f"agent_type: {getattr(run, 'agent_type', '')}")
+    _emit(f"label: {getattr(run, 'label', '')}")
+    _emit(f"stop: {stop}")
+    if diag:
+        _emit(f"diagnostic: {diag}")
+    _emit(output if output else "(empty)")
+    return False
+
+
+@_register("mode", "Harness mode: /mode [plan|chat|agent].")
+def _cmd_mode(state: _SessionState, arg: str) -> bool:
+    from harness import ensure_harness
+
+    harness = ensure_harness(state)
+    token = arg.strip().lower()
+    if not token:
+        _emit(f"mode: {harness.mode}")
+        _emit("usage: /mode [plan|chat|agent]")
+        return False
+    try:
+        mode = harness.set_mode(token)
+    except ValueError as exc:
+        _emit(f"error: {exc}")
+        return False
+    _emit(f"(harness mode = {mode})")
+    return False
+
+
+@_register("permissions", "Show harness rules. /permissions [reload].")
+def _cmd_permissions(state: _SessionState, arg: str) -> bool:
+    from harness import ensure_harness
+
+    harness = ensure_harness(state)
+    cmd = arg.strip().lower()
+    if cmd in ("reload", "refresh"):
+        harness.reload()
+        _emit("(harness policy reloaded)")
+    _emit(harness.describe())
+    return False
+
+
+@_register("assist", "Code review queue: /assist [status|accept|decline|undo|redo].")
+def _cmd_assist(state: _SessionState, arg: str) -> bool:
+    from cli.assist_tools import (
+        accept_pending_edits,
+        decline_pending_edits,
+        redo_accepted_edits,
+        undo_accepted_edits,
+    )
+    from cli.code_assist import ensure_assist
+
+    controller = ensure_assist(state)
+    cmd = arg.strip().lower() or "status"
+    if cmd in ("status", "list", "show"):
+        _emit(controller.status_text(state.editor_workspace or state.project_root))
+        return False
+    if cmd in ("accept", "apply"):
+        _emit(accept_pending_edits(state))
+        return False
+    if cmd in ("decline", "reject", "dismiss"):
+        _emit(decline_pending_edits(state))
+        return False
+    if cmd in ("undo",):
+        _emit(undo_accepted_edits(state))
+        return False
+    if cmd in ("redo",):
+        _emit(redo_accepted_edits(state))
+        return False
+    _emit("usage: /assist [status|accept|decline|undo|redo]")
+    return False
+
+
+@_register(
+    "memory-status",
+    "Show memory store and session info.",
+    aliases=("memorystatus",),
+)
 def _cmd_memory_status(state: _SessionState, _arg: str) -> bool:
     if state.memory is None or state.memory_scope is None:
-        _emit("memory: disabled (pass --memory-db or set ORODRUIN_MEMORY_DB)")
+        _emit("memory: disabled (SOPHON_MEMORY_DB=0)")
         return False
     try:
         recent = state.memory.load_recent_turns(state.memory_scope, max(state.memory_recall_turns, 1))
@@ -1598,6 +2992,14 @@ def _cmd_memory_status(state: _SessionState, _arg: str) -> bool:
         f"memory: session={scope.session_id} user={scope.user_id} "
         f"recall_turns={state.memory_recall_turns} loaded={len(recent)}"
     )
+    if state.memory_layer is not None:
+        status = state.memory_layer.status()
+        _emit(
+            "  tiers: "
+            f"semantic={status['semantic']} procedural={status['procedural']} "
+            f"working={status['working']} episodic={status['episodic']} "
+            f"(last_dropped={state.last_memory_dropped})"
+        )
     return False
 
 
@@ -1859,20 +3261,57 @@ def _cmd_transcribe(state: _SessionState, arg: str) -> bool:
     return False
 
 
-@_register("listen", "Record from the mic then put transcript in the prompt: /listen [SECONDS]. TUI: Ctrl+L.")
+@_register("listen", "Toggle mic recording into the prompt: /listen [stop|cancel]. TUI: Speak button or Ctrl+L.")
 def _cmd_listen(state: _SessionState, arg: str) -> bool:
-    token = arg.strip()
-    seconds: float | None = None
+    token = arg.strip().lower()
+    if token in ("cancel", "discard"):
+        cancel_sst_recording(state)
+        return False
+    if token in ("stop", "end"):
+        finish_sst_recording(state)
+        return False
+    if sst_recording(state):
+        finish_sst_recording(state)
+        return False
+    max_seconds: float | None = None
     if token:
         try:
-            seconds = float(token)
+            max_seconds = float(token)
         except ValueError:
-            _emit("usage: /listen [SECONDS]")
+            _emit("usage: /listen [stop|cancel]")
             return False
-        seconds = max(1.0, min(seconds, 120.0))
-    text = listen_from_microphone(state, max_seconds=seconds)
-    if text.strip():
-        _dictate(text)
+        max_seconds = max(2.0, min(max_seconds, 300.0))
+    start_sst_recording(state, max_seconds=max_seconds)
+    return False
+
+
+@_register("listen-cancel", "Discard the current microphone recording.")
+def _cmd_listen_cancel(state: _SessionState, _arg: str) -> bool:
+    cancel_sst_recording(state)
+    return False
+
+
+@_register("play", "Replay a stored speech clip: /play [last|user|assistant|N] [1x|1.5x|2x].")
+def _cmd_play(state: _SessionState, arg: str) -> bool:
+    play_speech_clip(state, arg)
+    return False
+
+
+@_register("clips", "List stored speech clips for this chat session.")
+def _cmd_clips(state: _SessionState, _arg: str) -> bool:
+    store = _ensure_speech_store(state)
+    if not store.clips:
+        _emit(f"(no speech clips in {store.root})")
+        return False
+    _emit(f"speech clips ({len(store.clips)}) · {store.root}")
+    for clip in store.clips:
+        who = "you" if clip.role == "user" else "assistant"
+        _emit(
+            f"  {clip.clip_id:>3}  {who:<9} {clip.source:<4} {clip.duration_s:.1f}s  "
+            f"{clip.path.name}"
+        )
+    speeds = " ".join(format_replay_speed(s) for s in default_replay_speeds())
+    _emit(f"replay: /play N [{speeds}]")
     return False
 
 
@@ -1914,6 +3353,128 @@ def _cmd_sst_lang(state: _SessionState, arg: str) -> bool:
     return False
 
 
+def _queue_memory_promotion(state: _SessionState, ids: list[str]) -> str:
+    layer = state.memory_layer
+    if layer is None:
+        return "memory: layer disabled (SOPHON_MEMORY_DB=0)"
+    proposal = layer.propose_promotion(ids)
+    if not proposal.promoted_ids:
+        skipped = f" skipped: {', '.join(proposal.skipped_ids)}" if proposal.skipped_ids else ""
+        return f"memory propose: nothing to promote.{skipped}"
+    from cli.code_assist import FileEdit, ensure_assist, notify_assist_ui
+
+    controller = ensure_assist(state)
+    edit = FileEdit(
+        path=proposal.path,
+        before=proposal.before,
+        after=proposal.after,
+        description=f"memory: promote {', '.join(proposal.promoted_ids)}",
+    )
+    controller.add_edit(edit)
+    notify_assist_ui(state)
+    msg = (
+        f"queued promotion of {', '.join(proposal.promoted_ids)} to facts.md. "
+        "Accept or Decline in Review."
+    )
+    if proposal.skipped_ids:
+        msg += f" skipped: {', '.join(proposal.skipped_ids)}"
+    return msg
+
+
+def _memory_status_lines(state: _SessionState) -> list[str]:
+    lines: list[str] = []
+    scope = state.memory_scope
+    if scope is not None:
+        lines.append(f"session={scope.session_id} user={scope.user_id}")
+    if state.memory_layer is not None:
+        status = state.memory_layer.status()
+        lines.append(
+            "tiers: "
+            f"semantic={status['semantic']} procedural={status['procedural']} "
+            f"working={status['working']} episodic={status['episodic']}"
+        )
+    if state.memory_budget is not None:
+        lines.append(
+            f"budget: {state.memory_budget.total_chars} chars, "
+            f"recall_turns={state.memory_budget.recall_turns}, "
+            f"last_dropped={state.last_memory_dropped}"
+        )
+    return lines
+
+
+@_register("memory", "Memory layer: status|list|search|note|promote|revoke|compact.")
+def _cmd_memory(state: _SessionState, arg: str) -> bool:
+    layer = state.memory_layer
+    parts = arg.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else "status"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if layer is None:
+        _emit("memory: layer disabled (SOPHON_MEMORY_DB=0)")
+        return False
+
+    if sub in ("status", ""):
+        for line in _memory_status_lines(state):
+            _emit(line)
+        return False
+
+    if sub == "list":
+        from processing.text.memory import normalize_tier
+
+        tier = normalize_tier(rest or "semantic")
+        entries = layer.list(tier)
+        if not entries:
+            _emit(f"memory {tier}: (none)")
+            return False
+        _emit(f"memory {tier}:")
+        for entry in entries:
+            _emit(f"  {entry.id} [{entry.confidence}] {entry.text}")
+        return False
+
+    if sub == "search":
+        if not rest:
+            _emit("usage: /memory search <query>")
+            return False
+        hits = layer.search(rest, limit=15)
+        if not hits:
+            _emit("memory search: (no hits)")
+            return False
+        for entry in hits:
+            _emit(f"  [{entry.tier}] {entry.id} [{entry.confidence}] {entry.text}")
+        return False
+
+    if sub == "note":
+        if not rest:
+            _emit("usage: /memory note <text>")
+            return False
+        _, message = layer.note(rest, confidence="decided")
+        _emit(f"(memory {message})")
+        return False
+
+    if sub == "promote":
+        ids = rest.split()
+        if not ids:
+            _emit("usage: /memory promote <id> [id...]")
+            return False
+        _emit(f"(memory {_queue_memory_promotion(state, ids)})")
+        return False
+
+    if sub == "revoke":
+        if not rest:
+            _emit("usage: /memory revoke <fact-id>")
+            return False
+        ok, message = layer.revoke(rest.split()[0])
+        _emit(f"(memory {message})" if ok else f"memory: {message}")
+        return False
+
+    if sub == "compact":
+        _emit(f"(memory {layer.compact()})")
+        return False
+
+    _emit("usage: /memory [status|list <tier>|search <q>|note <text>|promote <id>|revoke <id>|compact]")
+    return False
+
+
 @_register("memory-clear", "Wipe persistent memory for the current session.")
 def _cmd_memory_clear(state: _SessionState, _arg: str) -> bool:
     if state.memory is None or state.memory_scope is None:
@@ -1926,6 +3487,136 @@ def _cmd_memory_clear(state: _SessionState, _arg: str) -> bool:
         return False
     state._last_persisted_user_obj_id = 0
     _emit(f"(memory cleared, {removed} rows removed)")
+    return False
+
+
+def _queue_skill_proposal(state: _SessionState, proposal) -> str:
+    from cli.code_assist import FileEdit, ensure_assist, notify_assist_ui
+
+    controller = ensure_assist(state)
+    verb = "create" if not proposal.before else "update"
+    edit = FileEdit(
+        path=proposal.path,
+        before=proposal.before,
+        after=proposal.after,
+        description=f"skill: {verb} {proposal.name}",
+    )
+    controller.add_edit(edit)
+    notify_assist_ui(state)
+    return f"queued {verb} of skill {proposal.name}. Accept or Decline in Review."
+
+
+@_register(
+    "skill",
+    "Skills: list|show <name>|attach <name>|detach [name]|create <name>|import <path>.",
+    aliases=("skills",),
+)
+def _cmd_skill(state: _SessionState, arg: str) -> bool:
+    catalog = state.skill_catalog
+    if catalog is None:
+        _emit("skills: disabled (SOPHON_SKILLS=0)")
+        return False
+    parts = arg.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else "list"
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("list", ""):
+        catalog.refresh()
+        if not catalog.entries:
+            _emit("skills: (none found)")
+            return False
+        _emit("skills:")
+        for entry in catalog.entries:
+            mark = " *attached" if entry.name in state.attached_skills else ""
+            desc = " ".join(entry.description.split())
+            _emit(f"  {entry.name} root={entry.root_label}{mark}: {desc}")
+        if catalog.shadowed:
+            _emit("  shadowed (not used):")
+            for name, root, winner in catalog.shadowed:
+                _emit(f"    {name} root={root} hidden by root={winner}")
+        return False
+
+    if sub == "show":
+        if not rest:
+            _emit("usage: /skill show <name>")
+            return False
+        entry = catalog.get(rest)
+        if entry is None:
+            _emit(f"skills: no skill named {rest!r}")
+            return False
+        _emit(f"# {entry.name} ({entry.root_label})")
+        _emit(entry.description)
+        body = entry.spec.body.strip()
+        if body:
+            _emit("")
+            _emit(body)
+        return False
+
+    if sub == "attach":
+        if not rest:
+            _emit("usage: /skill attach <name>")
+            return False
+        entry = catalog.get(rest)
+        if entry is None:
+            _emit(f"skills: no skill named {rest!r}")
+            return False
+        if entry.name not in state.attached_skills:
+            state.attached_skills.append(entry.name)
+        _emit(f"(skill attached: {entry.name})")
+        return False
+
+    if sub == "detach":
+        if not rest:
+            count = len(state.attached_skills)
+            state.attached_skills.clear()
+            _emit(f"(skills detached: {count})")
+            return False
+        target = rest.strip().lower()
+        if target in state.attached_skills:
+            state.attached_skills.remove(target)
+            _emit(f"(skill detached: {target})")
+        else:
+            _emit(f"skills: {target!r} was not attached")
+        return False
+
+    if sub == "create":
+        tokens = rest.split()
+        user = "--user" in tokens
+        tokens = [t for t in tokens if t != "--user"]
+        if not tokens:
+            _emit("usage: /skill create <name> [--user] [description]")
+            return False
+        name = tokens[0]
+        description = " ".join(tokens[1:]).strip() or None
+        from processing.text.skills import scaffold_skill
+
+        try:
+            proposal = scaffold_skill(state.project_root, name, description, user=user)
+        except ValueError as exc:
+            _emit(f"skills: {exc}")
+            return False
+        _emit(f"(skill {_queue_skill_proposal(state, proposal)})")
+        return False
+
+    if sub == "import":
+        tokens = rest.split()
+        user = "--user" in tokens
+        tokens = [t for t in tokens if t != "--user"]
+        if not tokens:
+            _emit("usage: /skill import <path> [--user]")
+            return False
+        source = " ".join(tokens).strip()
+        from processing.text.skills import import_skill
+
+        try:
+            proposal = import_skill(state.project_root, source, user=user)
+        except ValueError as exc:
+            _emit(f"skills: {exc}")
+            return False
+        _emit(f"(skill {_queue_skill_proposal(state, proposal)})")
+        return False
+
+    _emit("usage: /skill [list|show <name>|attach <name>|detach [name]|create <name>|import <path>]")
     return False
 
 
@@ -1954,7 +3645,7 @@ def _cmd_params(state: _SessionState, _arg: str) -> bool:
     if is_server_backend(state.backend_id):
         _emit(
             f"context: {state.backend_id} context window is set when the model is loaded "
-            f"in the server UI (not via orodruin per request). Reply budget is /max."
+            f"in the server UI (not via sophon per request). Reply budget is /max."
         )
     elif state.meta is not None and state.meta.max_position_embeddings:
         _emit(f"context window: {state.meta.max_position_embeddings:,} tokens (from local weights)")
@@ -2074,6 +3765,73 @@ def _cmd_unlimited(state: _SessionState, _arg: str) -> bool:
     return False
 
 
+@_register("chat", "Leave shell mode and return to chat.")
+def _cmd_chat_mode(state: _SessionState, _arg: str) -> bool:
+    _ = _arg
+    state.shell_mode = False
+    _emit("(shell mode off)")
+    return False
+
+
+@_register("auto-attach", "Attach @path file text on send: /auto-attach on | off | show.")
+def _cmd_auto_attach(state: _SessionState, arg: str) -> bool:
+    token = arg.strip().lower()
+    if token in ("", "show"):
+        _emit("auto-attach = " + ("on" if state.auto_attach else "off"))
+        return False
+    if token in ("on", "1", "true", "yes"):
+        state.auto_attach = True
+    elif token in ("off", "0", "false", "no"):
+        state.auto_attach = False
+    else:
+        _emit("usage: /auto-attach on | off | show")
+        return False
+    _emit("(auto-attach = " + ("on" if state.auto_attach else "off") + ")")
+    return False
+
+
+def prepare_user_message_text(state: _SessionState, line: str) -> str:
+    from cli.tui.paste_drop import expand_at_paths, mention_roots
+
+    raw = line.rstrip()
+    if "\n--- file:" in raw or "\n--- path:" in raw:
+        return raw
+    extra: list[Path] = []
+    root = getattr(state, "project_root", None)
+    if root is not None:
+        extra.append(Path(root))
+    return expand_at_paths(
+        raw,
+        mention_roots(extra),
+        attach=bool(getattr(state, "auto_attach", True)),
+    )
+
+
+def trim_incomplete_sentence(text: str, stop_reason: str) -> str:
+    reason = str(stop_reason or "").lower()
+    if reason not in ("length", "max_new_tokens", "max_tokens"):
+        return text
+    stripped = (text or "").rstrip()
+    if not stripped:
+        return text
+    if stripped[-1] in ".?!…":
+        return text
+    last = max(stripped.rfind("."), stripped.rfind("?"), stripped.rfind("!"))
+    if last < 0:
+        return text
+    return stripped[: last + 1]
+
+
+def _run_shell_mode_command(state: _SessionState, command: str) -> None:
+    from types import SimpleNamespace
+
+    from integrations.shell.tools import SHELL_EXEC
+
+    call = SimpleNamespace(name=SHELL_EXEC, arguments={"command": command})
+    result = _execute_one_tool(state, call)
+    _emit(result)
+
+
 def _dispatch_command(state: _SessionState, line: str) -> tuple[bool, bool]:
     """Returns (handled, should_generate)."""
     if not line:
@@ -2081,6 +3839,11 @@ def _dispatch_command(state: _SessionState, line: str) -> tuple[bool, bool]:
     stripped = line.strip()
     if stripped.lower() in ("exit", "quit"):
         state.exit_requested = True
+        return True, False
+
+    if stripped == "!":
+        state.shell_mode = not bool(getattr(state, "shell_mode", False))
+        _emit("(shell mode on)" if state.shell_mode else "(shell mode off)")
         return True, False
 
     if len(stripped) == 1 and stripped in _SHORTCUTS:
@@ -2102,7 +3865,14 @@ def _dispatch_command(state: _SessionState, line: str) -> tuple[bool, bool]:
         if cmd is None:
             _emit(f"(unknown command: /{name})  type /help")
             return True, False
+        from cli.slash_index import remember_slash_use
+
+        state.slash_recents = remember_slash_use(list(state.slash_recents), cmd.name)
         return True, cmd.handler(state, arg)
+
+    if bool(getattr(state, "shell_mode", False)):
+        _run_shell_mode_command(state, line.rstrip())
+        return True, False
 
     return False, False
 
@@ -2150,16 +3920,38 @@ def _record_retrieval_metrics(state: _SessionState, result: RetrievalResult) -> 
 
 
 def _run_retrieval(state: _SessionState) -> RetrievalResult | None:
-    if state.retriever is None:
+    if state.retriever is None and state.structure_retriever is None:
         return None
     query_text = _latest_user_text(state)
     if not query_text:
+        return None
+    structure_available = state.structure_retriever is not None
+    if state.rag_adaptive:
+        adaptive = decide_retrieval(query_text, structure_available=structure_available)
+    else:
+        adaptive = AdaptiveDecision(RetrievalDecision.SINGLE_HOP, "adaptive_disabled")
+    state.last_retrieval_decision = {
+        "decision": adaptive.decision.value,
+        "reason": adaptive.reason,
+    }
+    if adaptive.decision == RetrievalDecision.SKIP:
+        if state.debug:
+            _emit(f"(retrieval skipped: {adaptive.reason})")
+        result = empty_result()
+        result.extras["adaptive"] = state.last_retrieval_decision
+        return result
+    active: RagRetriever | None
+    if adaptive.decision == RetrievalDecision.MULTI_HOP and state.structure_retriever is not None:
+        active = state.structure_retriever
+    else:
+        active = state.retriever or state.structure_retriever
+    if active is None:
         return None
     try:
         import time
 
         t0 = time.perf_counter()
-        result = state.retriever.retrieve(
+        result = active.retrieve(
             RetrievalQuery(text=query_text, params={"top_k": state.retrieval_top_k}),
         )
         if not isinstance(result.extras.get("metrics"), dict):
@@ -2170,14 +3962,115 @@ def _run_retrieval(state: _SessionState) -> RetrievalResult | None:
                 chunks=list(result.chunks),
                 top_k=state.retrieval_top_k,
                 query_chars=len(query_text),
-                backend_id=state.retriever.backend_id(),
+                backend_id=active.backend_id(),
             )
             result.extras["metrics"] = metrics.as_dict()
+        result.extras["adaptive"] = state.last_retrieval_decision
         _record_retrieval_metrics(state, result)
         return result
     except Exception as exc:
         _emit(f"(retrieval failed: {exc})")
         return None
+
+
+def _retrieval_trace_from_run(
+    state: _SessionState,
+    retrieval: RetrievalResult | None,
+) -> RetrievalTrace:
+    enabled = state.retriever is not None or state.structure_retriever is not None
+    if not enabled:
+        return RetrievalTrace(enabled=False)
+    if retrieval is None:
+        return RetrievalTrace(enabled=True, failed=True, reason="error")
+    extras = retrieval.extras if isinstance(retrieval.extras, dict) else {}
+    adaptive = extras.get("adaptive") if isinstance(extras.get("adaptive"), dict) else None
+    if not isinstance(adaptive, dict):
+        adaptive = state.last_retrieval_decision if isinstance(state.last_retrieval_decision, dict) else {}
+    decision = str(adaptive.get("decision") or "")
+    reason = str(adaptive.get("reason") or "")
+    metrics = extras.get("metrics") if isinstance(extras.get("metrics"), dict) else None
+    backend_id = ""
+    if isinstance(metrics, dict):
+        backend_id = str(metrics.get("backend_id") or "")
+    if not backend_id:
+        active = state.retriever or state.structure_retriever
+        if active is not None:
+            try:
+                backend_id = str(active.backend_id())
+            except Exception:
+                backend_id = ""
+    skipped = decision == RetrievalDecision.SKIP.value
+    return RetrievalTrace(
+        enabled=True,
+        skipped=skipped,
+        failed=False,
+        decision=decision,
+        reason=reason,
+        backend_id=backend_id,
+        metrics=metrics,
+    )
+
+
+def _completion_reasoning(completion: object) -> str | None:
+    from cli.agent_runtime import completion_reasoning
+
+    return completion_reasoning(completion)
+
+
+@dataclass
+class _ServerLoopOutcome:
+    text: str
+    elapsed_s: float
+    spoke: bool
+    prompt_tokens: int
+    completion_tokens: int
+    stop_reason: str
+    reasoning: str | None
+    tools: list[ToolCallTrace]
+    rounds: int
+
+
+def _commit_assistant_turn(
+    state: _SessionState,
+    text: str,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    elapsed: float,
+    stop_reason: str,
+    retrieval: RetrievalResult | None,
+    spoke: bool,
+    reasoning: str | None = None,
+    plan_text: str | None = None,
+    tools: list[ToolCallTrace] | None = None,
+    tool_rounds: int = 0,
+) -> None:
+    text = trim_incomplete_sentence(text, stop_reason)
+    state.messages.append({"role": "assistant", "content": text})
+    _persist_turn_after_success(state)
+    state.stats.record_turn(
+        input_tokens=prompt_tokens,
+        new_tokens=completion_tokens,
+        gen_time_s=elapsed,
+        stop_reason=stop_reason,
+    )
+    trace = build_turn_trace(
+        input_tokens=prompt_tokens,
+        new_tokens=completion_tokens,
+        gen_time_s=elapsed,
+        stop_reason=stop_reason,
+        backend_id=str(state.backend_id),
+        retrieval=_retrieval_trace_from_run(state, retrieval),
+        reasoning=reasoning,
+        plan_text=plan_text,
+        tools=tools,
+        tool_rounds=tool_rounds,
+    )
+    _emit_assistant(str(text), trace)
+    if not spoke:
+        _maybe_play_assistant_tts(state, str(text))
+    if state.debug:
+        _emit(state.stats.format_footer())
 
 
 def _load_memory_turns(state: _SessionState) -> list[object]:
@@ -2190,22 +4083,94 @@ def _load_memory_turns(state: _SessionState) -> list[object]:
         return []
 
 
+def _last_user_text(state: _SessionState) -> str:
+    for msg in reversed(state.messages):
+        if msg.get("role") == "user":
+            return str(msg.get("content", ""))
+    return ""
+
+
+def _build_memory_pack(state: _SessionState):
+    if state.memory_layer is None:
+        return None
+    from processing.text.memory import budget_from_env
+
+    budget = state.memory_budget or budget_from_env(max(state.memory_recall_turns, 0))
+    try:
+        pack = state.memory_layer.pack(_last_user_text(state), budget)
+    except Exception as exc:
+        _emit(f"(memory pack failed: {exc})")
+        return None
+    state.last_memory_dropped = pack.total_dropped
+    return pack
+
+
+def _build_skills_block(state: _SessionState) -> str | None:
+    catalog = state.skill_catalog
+    if catalog is None:
+        return None
+    lines: list[str] = []
+    if catalog.entries:
+        cat_lines, dropped = catalog.catalog_lines()
+        if cat_lines:
+            lines.append("Skills (reusable procedures; read one before you follow it):")
+            lines.extend(cat_lines)
+            if dropped > 0:
+                lines.append(f"(skills: {dropped} hidden for budget; use /skill list)")
+    attached: list[str] = []
+    for name in state.attached_skills:
+        entry = catalog.get(name)
+        if entry is None:
+            continue
+        body = entry.spec.body.strip()
+        header = f"## Skill: {entry.name}"
+        attached.append(f"{header}\n{body}" if body else header)
+    if attached:
+        lines.append("")
+        lines.append("Attached skills (follow these now):")
+        lines.append("\n\n".join(attached))
+    if not lines:
+        return None
+    return "\n".join(lines).strip()
+
+
 def _build_call_messages(
     state: _SessionState,
     retrieval: RetrievalResult | None,
 ) -> tuple[list[dict[str, object]], ContextBuildResult]:
-    memory_turns = _load_memory_turns(state)
-    if retrieval is None and not memory_turns:
+    memory_pack = _build_memory_pack(state)
+    memory_turns = [] if memory_pack is not None else _load_memory_turns(state)
+    pack_has_content = memory_pack is not None and not memory_pack.is_empty()
+    skills_block = _build_skills_block(state)
+    if retrieval is None and not memory_turns and not pack_has_content and not skills_block:
         return list(state.messages), ContextBuildResult(messages=list(state.messages))
     base = [m for m in state.messages if m.get("role") != "system"]
     built = build_messages_for_model(
         base,
         retrieval=retrieval,
         memory_turns=memory_turns,
+        memory_pack=memory_pack,
+        skills_block=skills_block,
         system_text=state.system_text,
         max_retrieval_chunks=state.retrieval_top_k,
     )
     return built.messages, built
+
+
+def _inject_token_budget(messages: list[dict[str, object]], max_new_tokens: int) -> list[dict[str, object]]:
+    extra = (
+        "Reply budget this turn is "
+        + str(max(int(max_new_tokens), 1))
+        + " tokens. End on a complete sentence. Do not start a sentence you cannot finish."
+    )
+    out = [dict(item) for item in messages]
+    for item in out:
+        if item.get("role") == "system":
+            body = str(item.get("content") or "").rstrip()
+            item["content"] = body + "\n" + extra if body else extra
+            return out
+    out.insert(0, {"role": "system", "content": extra})
+    return out
 
 
 def _persist_turn_after_success(state: _SessionState) -> None:
@@ -2269,7 +4234,44 @@ def _speak_roots(state: _SessionState) -> list[Path]:
     return out
 
 
+def _speech_session_id(state: _SessionState) -> str:
+    if state.memory_scope is not None and str(state.memory_scope.session_id).strip():
+        return str(state.memory_scope.session_id)
+    return _dt.datetime.now().strftime("session_%Y%m%d_%H%M%S")
+
+
+def _ensure_speech_store(state: _SessionState) -> SessionSpeechStore:
+    if state.speech_store is None:
+        state.speech_store = SessionSpeechStore.open(_speech_session_id(state))
+    return state.speech_store
+
+
+def _make_speech_store(memory_scope: MemoryScope | None) -> SessionSpeechStore:
+    if memory_scope is not None and str(memory_scope.session_id).strip():
+        session_id = str(memory_scope.session_id)
+    else:
+        session_id = _dt.datetime.now().strftime("session_%Y%m%d_%H%M%S")
+    return SessionSpeechStore.open(session_id)
+
+
 def _speak_now(state: _SessionState, text: str) -> None:
+    store = _ensure_speech_store(state)
+    clip = speak_text_to_store(
+        engine=_tts_engine_singleton(state),
+        store=store,
+        text=text,
+        speaker=state.tts_speaker,
+        language=state.tts_language,
+        instruct=state.tts_instruct,
+        max_chars=max(state.tts_max_chars, 1),
+        emit=_emit,
+        plain_text=state.tts_plain_text,
+        speed=float(getattr(state, "tts_speed", 1.0) or 1.0),
+        role="assistant",
+    )
+    if clip is not None:
+        _announce_speech_clip(clip)
+        return
     speak_text_blocking(
         engine=_tts_engine_singleton(state),
         text=text,
@@ -2281,6 +4283,79 @@ def _speak_now(state: _SessionState, text: str) -> None:
         plain_text=state.tts_plain_text,
         speed=float(getattr(state, "tts_speed", 1.0) or 1.0),
     )
+
+
+def _resolve_play_clip(
+    store: SessionSpeechStore,
+    *,
+    token: str | None,
+) -> SpeechClip | None:
+    if token is None or token == "":
+        return store.last()
+    low = token.lower()
+    if low in ("last", "latest"):
+        return store.last()
+    if low in ("user", "you", "me", "mic"):
+        return store.last(role="user")
+    if low in ("assistant", "model", "tts"):
+        return store.last(role="assistant")
+    try:
+        clip_id = int(token)
+    except ValueError:
+        return None
+    return store.get(clip_id)
+
+
+def play_speech_clip(state: _SessionState, arg: str = "", speed: float | None = None) -> None:
+    store = _ensure_speech_store(state)
+    raw = arg.strip()
+    tokens = raw.split() if raw else []
+    clip_token: str | None = None
+    rate = speed
+    if tokens:
+        first = tokens[0]
+        parsed_speed = parse_replay_speed(first)
+        first_is_clip = first.isdigit() or first.lower() in (
+            "last",
+            "latest",
+            "user",
+            "you",
+            "me",
+            "mic",
+            "assistant",
+            "model",
+            "tts",
+        )
+        if len(tokens) == 1:
+            if first_is_clip:
+                clip_token = first
+            elif parsed_speed is not None:
+                rate = parsed_speed
+            else:
+                _emit("usage: /play [last|user|assistant|N] [1x|1.5x|2x]")
+                return
+        else:
+            clip_token = first
+            parsed_speed = parse_replay_speed(tokens[1])
+            if parsed_speed is None:
+                _emit("usage: /play [last|user|assistant|N] [1x|1.5x|2x]")
+                return
+            rate = parsed_speed
+    clip = _resolve_play_clip(store, token=clip_token)
+    if clip is None:
+        _emit("(no matching speech clip)")
+        return
+    if not clip.path.is_file():
+        _emit(f"(clip {clip.clip_id} missing: {clip.path})")
+        return
+    if rate is None:
+        rate = 1.0
+    who = "you" if clip.role == "user" else "assistant"
+    _emit(f"(playing clip {clip.clip_id} {who} {format_replay_speed(rate)})")
+    try:
+        play_wav_file(clip.path, speed=rate)
+    except Exception as exc:
+        _emit(f"(play failed: {exc})")
 
 
 def _run_speak_request(
@@ -2314,12 +4389,12 @@ def _maybe_play_assistant_tts(state: _SessionState, text: str) -> None:
 
 
 def _tts_tools_enabled() -> bool:
-    raw = os.environ.get("ORODRUIN_TTS_TOOL", "1").strip().lower()
+    raw = os.environ.get("SOPHON_TTS_TOOL", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
 def _sst_tools_enabled() -> bool:
-    raw = os.environ.get("ORODRUIN_SST_TOOL", "1").strip().lower()
+    raw = os.environ.get("SOPHON_SST_TOOL", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
@@ -2329,31 +4404,64 @@ def _obsidian_tools_wanted() -> bool:
     return obsidian_tools_enabled()
 
 
+def _zotero_tools_wanted() -> bool:
+    from integrations.zotero.client import zotero_tools_enabled
+
+    return zotero_tools_enabled()
+
+
+def _google_tools_wanted() -> bool:
+    from integrations.google.bookmarks import bookmarks_available
+    from integrations.google.oauth import google_tools_enabled, list_accounts
+    from integrations.google.search import web_search_tools_enabled
+
+    if google_tools_enabled() and list_accounts():
+        return True
+    if bookmarks_available():
+        return True
+    return web_search_tools_enabled()
+
+
+def _overleaf_tools_wanted() -> bool:
+    from integrations.overleaf.client import overleaf_tools_enabled
+
+    return overleaf_tools_enabled()
+
+
 def _shell_tools_wanted() -> bool:
     from integrations.shell.runner import shell_tools_enabled
 
     return shell_tools_enabled()
 
 
+def _editor_tools_wanted() -> bool:
+    from cli.code_assist import editor_tools_enabled
+
+    return editor_tools_enabled()
+
+
+def _memory_tools_wanted() -> bool:
+    from processing.text.memory.tools import memory_tools_enabled
+
+    return memory_tools_enabled()
+
+
+def _skill_tools_wanted() -> bool:
+    from processing.text.skills import skill_tools_enabled
+
+    return skill_tools_enabled()
+
+
+def _spawn_tools_in_schema(state: _SessionState) -> bool:
+    from harness.subagent.tools import spawn_tools_in_schema
+
+    return spawn_tools_in_schema(state)
+
+
 def _tool_calls_openai_payload(tool_calls: list) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    for call in tool_calls:
-        name = getattr(call, "name", None) or ""
-        call_id = getattr(call, "id", None) or name
-        args = getattr(call, "arguments", None)
-        if not isinstance(args, dict):
-            args = {}
-        out.append(
-            {
-                "id": str(call_id),
-                "type": "function",
-                "function": {
-                    "name": str(name),
-                    "arguments": json.dumps(args, ensure_ascii=False),
-                },
-            }
-        )
-    return out
+    from cli.agent_runtime import tool_calls_openai_payload
+
+    return tool_calls_openai_payload(tool_calls)
 
 
 def _execute_speak_tool(state: _SessionState, args: dict) -> str:
@@ -2389,6 +4497,11 @@ def _run_transcribe_request(state: _SessionState, path_token: str) -> str:
     except Exception as exc:
         _emit(f"(sst failed: {exc})")
         return ""
+    try:
+        clip = _ensure_speech_store(state).ingest_file(path, role="user", source="file")
+        _announce_speech_clip(clip)
+    except Exception as exc:
+        _emit(f"(speech clip save failed: {exc})")
     result = transcribe_path_blocking(
         engine=_sst_engine_singleton(state),
         path=path,
@@ -2412,20 +4525,132 @@ def transcribe_audio_paths(state: _SessionState, paths: list[Path]) -> str:
     return "\n".join(parts)
 
 
-def listen_from_microphone(state: _SessionState, max_seconds: float | None = None) -> str:
-    from processing.audio.speech.listen import listen_and_transcribe_blocking
+def sst_recording(state: _SessionState) -> bool:
+    mic = state.sst_mic
+    if mic is None:
+        return False
+    active = getattr(mic, "active", False)
+    finishing = getattr(mic, "finishing", False)
+    return bool(active) and not bool(finishing)
 
-    result = listen_and_transcribe_blocking(
-        engine=_sst_engine_singleton(state),
-        language=state.sst_language,
-        emit=_emit,
-        max_seconds=max_seconds,
+
+def start_sst_recording(state: _SessionState, max_seconds: float | None = None) -> None:
+    from processing.audio.speech.capture import MicRecorder, record_max_seconds_default
+
+    if state.sst_busy:
+        _emit("(sst busy: wait for the current transcript)")
+        return
+    if sst_recording(state):
+        _emit("(sst already recording · /listen to stop)")
+        return
+
+    cap = record_max_seconds_default() if max_seconds is None else max(2.0, min(float(max_seconds), 300.0))
+
+    def on_status(phase: str) -> None:
+        _notify_mic(phase)
+
+    recorder = MicRecorder(max_seconds=cap, on_status=on_status)
+    state.sst_mic = recorder
+    try:
+        recorder.start()
+    except Exception as exc:
+        state.sst_mic = None
+        _emit(f"(sst listen failed: {exc})")
+        _notify_mic("idle")
+        return
+    _notify_mic("recording")
+    _emit(
+        f"(sst recording · Speak/Ctrl+L or /listen to stop · /listen-cancel to discard · max {cap:.0f}s)"
     )
-    if not result.text.strip():
+
+
+def cancel_sst_recording(state: _SessionState) -> None:
+    mic = state.sst_mic
+    if mic is None:
+        _emit("(sst: not recording)")
+        return
+    try:
+        take = getattr(mic, "take_finish", None)
+        if callable(take) and not take():
+            return
+        mic.cancel()
+        mic.join(timeout=3.0)
+    except Exception as exc:
+        _emit(f"(sst cancel failed: {exc})")
+    finally:
+        state.sst_mic = None
+        state.sst_busy = False
+        _notify_mic("idle")
+    _emit("(sst cancelled)")
+
+
+def finish_sst_recording(state: _SessionState) -> str:
+    from processing.audio.speech.capture import describe_capture, quiet_rms_threshold
+    from processing.audio.speech.listen import transcribe_wave_blocking
+
+    mic = state.sst_mic
+    if mic is None:
+        _emit("(sst: not recording)")
         return ""
-    lang = result.language or "auto"
-    _emit(f"(sst listen, {len(result.text)} chars, lang={lang})")
-    return result.text
+    take = getattr(mic, "take_finish", None)
+    if callable(take) and not take():
+        return ""
+    state.sst_busy = True
+    _notify_mic("transcribing")
+    try:
+        mic.stop()
+        mic.join(timeout=8.0)
+        wave, rate, peak_rms = mic.result()
+    except Exception as exc:
+        state.sst_mic = None
+        state.sst_busy = False
+        _notify_mic("idle")
+        _emit(f"(sst listen failed: {exc})")
+        return ""
+
+    stats = describe_capture(wave, rate, peak_rms)
+    if getattr(mic, "hit_max", False):
+        _emit(f"(sst hit max {getattr(mic, 'max_seconds', 0):.0f}s · captured {stats})")
+    else:
+        _emit(f"(sst captured {stats})")
+    if peak_rms < quiet_rms_threshold():
+        _emit("(sst warning: mic level is near silence. Check SOPHON_SST_MIC.)")
+
+    try:
+        clip = _ensure_speech_store(state).save_wave(wave, rate, role="user", source="mic")
+        _announce_speech_clip(clip)
+    except Exception as exc:
+        _emit(f"(speech clip save failed: {exc})")
+
+    try:
+        _emit("(sst transcribing)")
+        result = transcribe_wave_blocking(
+            engine=_sst_engine_singleton(state),
+            wave=wave,
+            sample_rate=rate,
+            language=state.sst_language,
+            emit=_emit,
+            peak_rms=peak_rms,
+        )
+        text = result.text.strip()
+        if not text:
+            _emit("(sst: no transcript produced. Nothing was inserted into the prompt.)")
+            return ""
+        lang = result.language or "auto"
+        _emit(f"(sst listen, {len(text)} chars, lang={lang})")
+        _dictate(text)
+        return text
+    finally:
+        state.sst_mic = None
+        state.sst_busy = False
+        _notify_mic("idle")
+
+
+def listen_from_microphone(state: _SessionState, max_seconds: float | None = None) -> str:
+    if sst_recording(state):
+        return finish_sst_recording(state)
+    start_sst_recording(state, max_seconds=max_seconds)
+    return ""
 
 
 def _execute_transcribe_tool(state: _SessionState, args: dict) -> str:
@@ -2438,24 +4663,141 @@ def _execute_transcribe_tool(state: _SessionState, args: dict) -> str:
     return f"transcript ({len(text)} chars):\n{text}"
 
 
+def _tool_target_path(state: _SessionState, name: str, args: dict) -> Path | None:
+    if name == "shell_cd":
+        from integrations.shell.runner import ShellSession
+
+        session = state.shell_session
+        path = args.get("path")
+        if path is None or str(path).strip() == "":
+            return Path.home()
+        if isinstance(session, ShellSession):
+            return session.resolve_path(str(path))
+        return Path(str(path)).expanduser()
+    if name == "editor_propose_edit":
+        from cli.code_assist import resolve_assist_path
+
+        try:
+            return resolve_assist_path(state, str(args.get("path") or ""))
+        except (OSError, ValueError):
+            return None
+    if name == "memory_propose":
+        layer = state.memory_layer
+        markdown = getattr(layer, "markdown", None)
+        facts = getattr(markdown, "facts_path", None)
+        if facts is not None:
+            return Path(facts)
+    return None
+
+
+def _authorize_tool(state: _SessionState, name: str, args: dict) -> str | None:
+    from harness import ensure_harness
+
+    harness = ensure_harness(state)
+    cwd = Path(state.project_root)
+    session = state.shell_session
+    session_cwd = getattr(session, "cwd", None)
+    if session_cwd is not None:
+        cwd = Path(session_cwd)
+    target = _tool_target_path(state, name, args)
+    ask = None if int(getattr(state, "delegation_depth", 0) or 0) > 0 else _ask_permission
+    result = harness.authorize(name, args, cwd=cwd, target=target, ask=ask)
+    state.last_permission = result.permission
+    if result.allowed:
+        return None
+    return result.message or "error: permission denied"
+
+
 def _execute_one_tool(state: _SessionState, call) -> str:
+    from cli.assist_tools import EDITOR_TOOL_NAMES, execute_editor_tool
+    from integrations.google.tools import GOOGLE_TOOL_NAMES, execute_google_tool
     from integrations.obsidian.tools import VAULT_TOOL_NAMES, execute_vault_tool
+    from integrations.overleaf.tools import OVERLEAF_TOOL_NAMES, execute_overleaf_tool
+    from integrations.zotero.tools import ZOTERO_TOOL_NAMES, execute_zotero_tool
     from integrations.shell.runner import ShellSession
     from integrations.shell.tools import SHELL_TOOL_NAMES, execute_shell_tool
     from processing.audio.speech.tools import SPEAK_TOOL_NAME, TRANSCRIBE_TOOL_NAME
+    from processing.text.memory.tools import (
+        MEMORY_PROPOSE,
+        MEMORY_TOOL_NAMES,
+        execute_memory_tool,
+    )
+    from processing.text.skills import SKILL_TOOL_NAMES, execute_skill_tool
+    from harness.subagent.tools import SUBAGENT_TOOL_NAMES, execute_subagent_tool
 
     name = getattr(call, "name", None) or ""
     args = getattr(call, "arguments", None)
     if not isinstance(args, dict):
         args = {}
+    quiet = bool(getattr(state, "quiet", False))
+
+    def progress(tool_name: str, preview: object) -> None:
+        if quiet:
+            return
+        _tool_progress_line(tool_name, preview)
+
+    if name in SHELL_TOOL_NAMES and state.shell_session is None:
+        state.shell_session = ShellSession(cwd=Path(state.project_root).resolve())
+    denied = _authorize_tool(state, str(name), args)
+    if denied:
+        return denied
+    if name in SUBAGENT_TOOL_NAMES:
+        preview = args.get("description") or args.get("prompt") or ""
+        progress(name, preview)
+        try:
+            return execute_subagent_tool(state, str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
+    if name in MEMORY_TOOL_NAMES:
+        preview = args.get("query") or args.get("text") or args.get("id") or args.get("ids") or ""
+        progress(name, preview)
+        try:
+            if name == MEMORY_PROPOSE:
+                raw_ids = args.get("ids")
+                if isinstance(raw_ids, list):
+                    ids = [str(i).strip() for i in raw_ids if str(i).strip()]
+                else:
+                    ids = str(raw_ids or "").split()
+                return _queue_memory_promotion(state, ids)
+            return execute_memory_tool(state.memory_layer, str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
+    if name in SKILL_TOOL_NAMES:
+        preview = args.get("name") or args.get("path") or ""
+        progress(name, preview)
+        try:
+            return execute_skill_tool(state.skill_catalog, str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
     if name == SPEAK_TOOL_NAME:
         return _execute_speak_tool(state, args)
     if name == TRANSCRIBE_TOOL_NAME:
         return _execute_transcribe_tool(state, args)
     if name in VAULT_TOOL_NAMES:
-        _emit(f"({name} {args})")
+        progress(name, args)
         try:
             return execute_vault_tool(str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
+    if name in ZOTERO_TOOL_NAMES:
+        preview = args.get("query") or args.get("collection") or args.get("key") or ""
+        progress(name, preview)
+        try:
+            return execute_zotero_tool(str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
+    if name in GOOGLE_TOOL_NAMES:
+        preview = args.get("query") or args.get("id") or args.get("parent_id") or ""
+        progress(name, preview)
+        try:
+            return execute_google_tool(str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
+    if name in OVERLEAF_TOOL_NAMES:
+        preview = args.get("project_id") or args.get("path") or ""
+        progress(name, preview)
+        try:
+            return execute_overleaf_tool(str(name), args)
         except Exception as exc:
             return f"error: {exc}"
     if name in SHELL_TOOL_NAMES:
@@ -2464,110 +4806,133 @@ def _execute_one_tool(state: _SessionState, call) -> str:
         session = state.shell_session
         assert isinstance(session, ShellSession)
         preview = args.get("command") or args.get("path") or ""
-        _emit(f"({name} {preview})")
+        progress(name, preview)
         try:
             return execute_shell_tool(session, str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
+    if name in EDITOR_TOOL_NAMES:
+        preview = args.get("path") or args.get("description") or ""
+        progress(name, preview)
+        try:
+            return execute_editor_tool(state, str(name), args)
         except Exception as exc:
             return f"error: {exc}"
     return f"error: unknown tool {name!r}"
 
 
 def _estimate_token_count(text: str) -> int:
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return 0
-    return max(1, (len(cleaned) + 3) // 4)
+    from cli.agent_runtime import estimate_token_count
+
+    return estimate_token_count(text)
 
 
 def _completion_token_counts(completion: object, *, text: str) -> tuple[int, int, str]:
-    prompt_tokens = getattr(completion, "prompt_tokens", None)
-    completion_tokens = getattr(completion, "completion_tokens", None)
-    finish_reason = getattr(completion, "finish_reason", None)
-    in_tok = int(prompt_tokens) if isinstance(prompt_tokens, int) else 0
-    out_tok = int(completion_tokens) if isinstance(completion_tokens, int) else _estimate_token_count(text)
-    stop = str(finish_reason) if finish_reason else "stop"
-    return in_tok, out_tok, stop
+    from cli.agent_runtime import completion_token_counts
+
+    return completion_token_counts(completion, text=text)
 
 
-def _run_server_tool_loop(
+def _session_tool_bundle(state: _SessionState) -> tuple[list[dict], str | None]:
+    from cli.chat_tools import chat_tools_system_hint, default_chat_tools
+    from cli.code_assist import editor_context_hint, ensure_assist
+    from harness import ensure_harness, harness_system_hint
+
+    ensure_assist(state)
+    tts_on = _tts_tools_enabled()
+    sst_on = _sst_tools_enabled()
+    obs_on = _obsidian_tools_wanted()
+    zot_on = _zotero_tools_wanted()
+    google_on = _google_tools_wanted()
+    overleaf_on = _overleaf_tools_wanted()
+    shell_on = _shell_tools_wanted()
+    editor_on = _editor_tools_wanted()
+    memory_on = state.memory_layer is not None and _memory_tools_wanted()
+    skill_on = state.skill_catalog is not None and _skill_tools_wanted()
+    spawn_on = _spawn_tools_in_schema(state)
+    tools = default_chat_tools(
+        tts_tool=tts_on,
+        sst_tool=sst_on,
+        obsidian_tool=obs_on,
+        zotero_tool=zot_on,
+        google_tool=google_on,
+        overleaf_tool=overleaf_on,
+        shell_tool=shell_on,
+        editor_tool=editor_on,
+        memory_tool=memory_on,
+        skill_tool=skill_on,
+        subagent_tool=spawn_on,
+    )
+    hint = chat_tools_system_hint(
+        tts_tool=tts_on,
+        sst_tool=sst_on,
+        obsidian_tool=obs_on,
+        zotero_tool=zot_on,
+        google_tool=google_on,
+        overleaf_tool=overleaf_on,
+        shell_tool=shell_on,
+        editor_tool=editor_on,
+        memory_tool=memory_on,
+        skill_tool=skill_on,
+        subagent_tool=spawn_on,
+    )
+    runtime = editor_context_hint(state) if editor_on else None
+    extra = "\n\n".join(
+        part
+        for part in (
+            hint,
+            harness_system_hint(ensure_harness(state)),
+            runtime,
+        )
+        if part
+    )
+    return tools, extra or None
+
+
+def _inject_system_extra(call_messages: list[dict[str, object]], extra: str) -> list[dict[str, object]]:
+    from cli.agent_runtime import inject_system_extra
+
+    return inject_system_extra(call_messages, extra)
+
+
+def _complete_chat_turn(
+    state: _SessionState,
+    messages: list[dict[str, object]],
+    tools: list[dict] | None,
+):
+    from cli.agent_runtime import complete_chat_turn
+
+    return complete_chat_turn(state, messages, tools)
+
+
+def _run_tool_loop(
     state: _SessionState,
     call_messages: list[dict[str, object]],
     *,
     tools: list[dict],
-) -> tuple[str, float, bool, int, int, str]:
-    from backend.chat_resolve import server_chat_complete
+) -> _ServerLoopOutcome:
+    from cli.agent_runtime import run_tool_loop
 
-    assert state.server_model is not None
-    working = [dict(m) for m in call_messages]
-    t0 = time.perf_counter()
-    spoke = False
-    text = ""
-    prompt_tokens = 0
-    completion_tokens = 0
-    stop_reason = "stop"
-    max_rounds = state.tool_max_rounds
-    round_i = 0
-    while True:
-        completion = server_chat_complete(
-            state.backend_id,
-            model=state.server_model,
-            messages=_messages_for_server(working),
-            max_new_tokens=state.params.max_new_tokens,
-            temperature=state.params.temperature,
-            top_p=state.params.top_p,
-            tools=tools,
-        )
-        text = str(getattr(completion, "text", None) or "")
-        in_tok, out_tok, stop_reason = _completion_token_counts(completion, text=text)
-        if in_tok > 0:
-            prompt_tokens = in_tok
-        completion_tokens += out_tok
-        tool_calls = list(getattr(completion, "tool_calls", None) or [])
-        if not tool_calls:
-            break
-        assistant_msg: dict[str, object] = {
-            "role": "assistant",
-            "content": text if text.strip() else None,
-            "tool_calls": _tool_calls_openai_payload(tool_calls),
-        }
-        working.append(assistant_msg)
-        for call in tool_calls:
-            name = getattr(call, "name", "") or ""
-            if name == "speak":
-                spoke = True
-            result = _execute_one_tool(state, call)
-            working.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": str(getattr(call, "id", None) or name),
-                    "name": str(name),
-                    "content": result,
-                }
-            )
-        round_i += 1
-        if max_rounds is not None and round_i >= max_rounds:
-            _emit("(tool loop hit max rounds; requesting final answer)")
-            completion = server_chat_complete(
-                state.backend_id,
-                model=state.server_model,
-                messages=_messages_for_server(working),
-                max_new_tokens=state.params.max_new_tokens,
-                temperature=state.params.temperature,
-                top_p=state.params.top_p,
-                tools=None,
-            )
-            text = str(getattr(completion, "text", None) or text)
-            in_tok, out_tok, stop_reason = _completion_token_counts(completion, text=text)
-            if in_tok > 0:
-                prompt_tokens = in_tok
-            completion_tokens += out_tok
-            break
-    elapsed = time.perf_counter() - t0
-    if not str(text).strip() and spoke:
-        text = "(spoken via speak tool)"
-    if completion_tokens <= 0:
-        completion_tokens = _estimate_token_count(text)
-    return text, elapsed, spoke, prompt_tokens, completion_tokens, stop_reason
+    outcome = run_tool_loop(
+        state,
+        call_messages,
+        tools=tools,
+        execute_tool=_execute_one_tool,
+        emit_think=_emit_think,
+        emit_tool=_emit_tool_heartbeat,
+        emit_line=_emit,
+    )
+    return _ServerLoopOutcome(
+        text=outcome.text,
+        elapsed_s=outcome.elapsed_s,
+        spoke=outcome.spoke,
+        prompt_tokens=outcome.prompt_tokens,
+        completion_tokens=outcome.completion_tokens,
+        stop_reason=outcome.stop_reason,
+        reasoning=outcome.reasoning,
+        tools=outcome.tools,
+        rounds=outcome.rounds,
+    )
 
 
 def _run_generation(state: _SessionState) -> None:
@@ -2601,122 +4966,89 @@ def _run_generation(state: _SessionState) -> None:
 
     retrieval = _run_retrieval(state)
     call_messages, built = _build_call_messages(state, retrieval)
+    call_messages = _inject_token_budget(call_messages, state.params.max_new_tokens)
     if state.debug and built.injected_blocks:
         _emit(f"(context: injected {', '.join(built.injected_blocks)})")
+    _emit_context_heartbeat(state, built)
 
-    if is_server_backend(state.backend_id):
-        assert state.server_model is not None
-        tts_on = state.backend_id == "lmstudio" and _tts_tools_enabled()
-        sst_on = state.backend_id == "lmstudio" and _sst_tools_enabled()
-        obs_on = state.backend_id == "lmstudio" and _obsidian_tools_wanted()
-        shell_on = state.backend_id == "lmstudio" and _shell_tools_wanted()
-        from cli.chat_tools import chat_tools_system_hint, default_chat_tools
-
-        tools = default_chat_tools(
-            tts_tool=tts_on,
-            sst_tool=sst_on,
-            obsidian_tool=obs_on,
-            shell_tool=shell_on,
-        )
-        hint = chat_tools_system_hint(
-            tts_tool=tts_on,
-            sst_tool=sst_on,
-            obsidian_tool=obs_on,
-            shell_tool=shell_on,
-        )
-        if hint:
-            has_system = any(m.get("role") == "system" for m in call_messages)
-            if has_system:
-                for m in call_messages:
-                    if m.get("role") == "system":
-                        prev = str(m.get("content") or "")
-                        m["content"] = (prev + "\n\n" + hint).strip()
-                        break
-            else:
-                call_messages = [{"role": "system", "content": hint}, *call_messages]
-        try:
-            prompt_tokens = 0
-            completion_tokens = 0
-            stop_reason = "stop"
-            if tools:
-                text, elapsed, spoke, prompt_tokens, completion_tokens, stop_reason = _run_server_tool_loop(
-                    state,
-                    call_messages,
-                    tools=tools,
-                )
-            else:
-                from backend.chat_resolve import server_chat_complete
-
-                t0 = time.perf_counter()
-                completion = server_chat_complete(
-                    state.backend_id,
-                    model=state.server_model,
-                    messages=_messages_for_server(call_messages),
-                    max_new_tokens=state.params.max_new_tokens,
-                    temperature=state.params.temperature,
-                    top_p=state.params.top_p,
-                    tools=None,
-                )
-                text = getattr(completion, "text", None)
-                if text is None:
-                    text = str(completion)
-                elapsed = time.perf_counter() - t0
-                spoke = False
-                prompt_tokens, completion_tokens, stop_reason = _completion_token_counts(
-                    completion,
-                    text=str(text),
-                )
-        except KeyboardInterrupt:
-            state.stats.record_exception()
-            if state.messages and state.messages[-1].get("role") == "user":
-                state.messages.pop()
-            _emit("(generation cancelled)")
-            return
-        except Exception as exc:
-            state.stats.record_exception()
-            if state.messages and state.messages[-1].get("role") == "user":
-                state.messages.pop()
-            _emit(f"Generation failed: {exc}")
-            return
-        finally:
-            try:
-                signal.signal(signal.SIGINT, prev_handler)
-            except (ValueError, OSError):
-                pass
-        state.messages.append({"role": "assistant", "content": text})
-        _persist_turn_after_success(state)
-        _CURRENT_IO.on_assistant(text)
-        if not spoke:
-            _maybe_play_assistant_tts(state, text)
-        state.stats.record_turn(
-            input_tokens=prompt_tokens,
-            new_tokens=completion_tokens,
-            gen_time_s=elapsed,
-            stop_reason=stop_reason,
-        )
-        if state.debug:
-            _emit(state.stats.format_footer())
-        return
-
-    meta = state.meta
-    assert meta is not None
+    tools, extra = _session_tool_bundle(state)
+    if extra:
+        call_messages = _inject_system_extra(call_messages, extra)
 
     try:
-        result: GenerationResult = generate_response(
-            state.processor,
-            state.model,
-            call_messages,
-            max_new_tokens=state.params.max_new_tokens,
-            enable_thinking=state.enable_thinking,
-            temperature=state.params.temperature,
-            top_p=state.params.top_p,
-            top_k=state.params.top_k,
-            repetition_penalty=state.params.repetition_penalty,
-            seed=state.params.seed,
-            strip=state.strip,
-            extra_specials=meta.special_tokens,
-            eos_token_ids=meta.eos_token_ids or None,
-        )
+        loop_tools: list[ToolCallTrace] = []
+        loop_rounds = 0
+        reasoning: str | None = None
+        plan_text: str | None = None
+        if tools:
+            outcome = _run_tool_loop(
+                state,
+                call_messages,
+                tools=tools,
+            )
+            text = outcome.text
+            elapsed = outcome.elapsed_s
+            spoke = outcome.spoke
+            prompt_tokens = outcome.prompt_tokens
+            completion_tokens = outcome.completion_tokens
+            stop_reason = outcome.stop_reason
+            reasoning = outcome.reasoning
+            loop_tools = outcome.tools
+            loop_rounds = outcome.rounds
+        elif is_server_backend(state.backend_id):
+            from backend.chat_resolve import server_chat_complete
+
+            t0 = time.perf_counter()
+            completion = server_chat_complete(
+                state.backend_id,
+                model=str(state.server_model or ""),
+                messages=_messages_for_server(call_messages),
+                max_new_tokens=state.params.max_new_tokens,
+                temperature=state.params.temperature,
+                top_p=state.params.top_p,
+                tools=None,
+            )
+            text = getattr(completion, "text", None)
+            if text is None:
+                text = str(completion)
+            elapsed = time.perf_counter() - t0
+            spoke = False
+            prompt_tokens, completion_tokens, stop_reason = _completion_token_counts(
+                completion,
+                text=str(text),
+            )
+            reasoning = _completion_reasoning(completion)
+            if reasoning:
+                _emit_think(reasoning)
+        else:
+            meta = state.meta
+            assert meta is not None
+            result: GenerationResult = generate_response(
+                state.processor,
+                state.model,
+                call_messages,
+                max_new_tokens=state.params.max_new_tokens,
+                enable_thinking=state.enable_thinking,
+                temperature=state.params.temperature,
+                top_p=state.params.top_p,
+                top_k=state.params.top_k,
+                repetition_penalty=state.params.repetition_penalty,
+                seed=state.params.seed,
+                strip=state.strip,
+                extra_specials=meta.special_tokens,
+                eos_token_ids=meta.eos_token_ids or None,
+            )
+            thought = getattr(result, "reasoning", None)
+            if thought:
+                _emit_think(str(thought))
+            text = parsed_to_display_text(result.parsed)
+            elapsed = result.gen_time_s
+            spoke = False
+            prompt_tokens = result.input_tokens
+            completion_tokens = result.new_tokens
+            stop_reason = result.stop_reason
+            reasoning = getattr(result, "reasoning", None)
+            plan_text = getattr(result, "plan", None)
     except KeyboardInterrupt:
         state.stats.record_exception()
         if state.messages and state.messages[-1].get("role") == "user":
@@ -2734,25 +5066,55 @@ def _run_generation(state: _SessionState) -> None:
             signal.signal(signal.SIGINT, prev_handler)
         except (ValueError, OSError):
             pass
+        _emit_heartbeat_end()
 
-    text = parsed_to_display_text(result.parsed)
-    state.messages.append({"role": "assistant", "content": text})
-    _persist_turn_after_success(state)
-    _CURRENT_IO.on_assistant(text)
-
-    _maybe_play_assistant_tts(state, text)
-
-    state.stats.record_turn(
-        input_tokens=result.input_tokens,
-        new_tokens=result.new_tokens,
-        gen_time_s=result.gen_time_s,
-        stop_reason=result.stop_reason,
+    _commit_assistant_turn(
+        state,
+        str(text),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        elapsed=elapsed,
+        stop_reason=stop_reason,
+        retrieval=retrieval,
+        spoke=spoke,
+        reasoning=reasoning,
+        tools=loop_tools,
+        tool_rounds=loop_rounds,
+        plan_text=plan_text,
     )
-    if state.debug:
-        _emit(state.stats.format_footer())
     warn = state.stats.warn_if_context_high(0.9)
     if warn:
         _emit(warn)
+
+
+def _init_rag_retrievers(params: ChatCliParams) -> tuple[RagRetriever | None, RagRetriever | None]:
+    retriever: RagRetriever | None = None
+    structure: RagRetriever | None = None
+    rag_id = str(params.rag or "noop").strip().lower()
+    try:
+        candidate = load_rag_retriever(
+            rag_id,
+            native_index_path=params.rag_index,
+            structure_dir=params.rag_structure_dir,
+        )
+        if candidate.backend_id() != "noop":
+            retriever = candidate
+    except Exception as exc:
+        _emit(f"(retrieval init failed: {exc})")
+        retriever = None
+    structure_id = str(getattr(params, "rag_structure", "none") or "none").strip().lower()
+    if structure_id not in ("", "none", "noop"):
+        try:
+            structure = load_rag_retriever(
+                structure_id,
+                structure_dir=params.rag_structure_dir,
+            )
+            if structure.backend_id() == "noop":
+                structure = None
+        except Exception as exc:
+            _emit(f"(structure retrieval init failed: {exc})")
+            structure = None
+    return retriever, structure
 
 
 def prepare_shell_chat_session(
@@ -2766,7 +5128,7 @@ def prepare_shell_chat_session(
     _suppress_noisy_warnings()
 
     enable_thinking = _thinking_default(params.thinking)
-    root = orodruin_project_root()
+    root = sophon_project_root()
     quantization = resolve_cli_quantization(qbit=params.qbit, quantization=params.quantization)
     if is_server_backend(backend_id) and server_model:
         model_path_str = f"{backend_id}:{server_model}"
@@ -2784,20 +5146,15 @@ def prepare_shell_chat_session(
     )
     stats = SessionStats(max_position_embeddings=None)
 
-    retriever: RagRetriever | None = None
-    try:
-        candidate = load_rag_retriever(params.rag, native_index_path=params.rag_index)
-        if candidate.backend_id() != "noop":
-            retriever = candidate
-    except Exception as exc:
-        _emit(f"(retrieval init failed: {exc})")
-        retriever = None
+    retriever, structure_retriever = _init_rag_retrievers(params)
 
     memory_store = open_memory_store(params.memory_db)
     memory_scope: MemoryScope | None = None
     if memory_store is not None:
         session_id = params.memory_session or _dt.datetime.now().strftime("session_%Y%m%d_%H%M%S")
         memory_scope = MemoryScope(session_id=session_id, user_id=params.memory_user)
+    memory_layer = open_memory_layer(memory_store, memory_scope, root)
+    memory_budget = budget_from_env(max(int(params.memory_recall_turns), 0))
 
     tts_opts = params.tts
     tts_instruct = tts_opts.tts_instruct
@@ -2817,6 +5174,7 @@ def prepare_shell_chat_session(
         else None
     )
 
+    from harness import load_harness
     from integrations.shell.runner import ShellSession
 
     return _SessionState(
@@ -2831,10 +5189,15 @@ def prepare_shell_chat_session(
         stats=stats,
         params=gen_params,
         retriever=retriever,
+        structure_retriever=structure_retriever,
         retrieval_top_k=max(int(params.rag_top_k), 1),
+        rag_adaptive=bool(getattr(params, "rag_adaptive", True)),
         memory=memory_store,
         memory_scope=memory_scope,
         memory_recall_turns=max(int(params.memory_recall_turns), 0),
+        memory_layer=memory_layer,
+        memory_budget=memory_budget,
+        skill_catalog=open_skill_catalog(root),
         tts_enabled=bool(tts_opts.tts_enabled),
         tts_plain_text=not bool(tts_opts.tts_raw_output),
         tts_model_id=str(tts_opts.tts_model),
@@ -2860,6 +5223,8 @@ def prepare_shell_chat_session(
         server_model=server_model,
         shell_session=ShellSession(cwd=root.resolve()),
         tool_max_rounds=_tool_max_rounds_from_env(),
+        speech_store=_make_speech_store(memory_scope),
+        harness=load_harness(root),
     )
 
 
@@ -2871,7 +5236,7 @@ def prepare_chat_session(
     _suppress_noisy_warnings()
 
     enable_thinking = _thinking_default(params.thinking)
-    root = orodruin_project_root()
+    root = sophon_project_root()
     preset_key = params.preset
     if params.preset is not None:
         resolved_model_dir = resolve_preset_dir(params.preset, root)
@@ -2898,20 +5263,15 @@ def prepare_chat_session(
     )
     stats = SessionStats(max_position_embeddings=meta.max_position_embeddings)
 
-    retriever: RagRetriever | None = None
-    try:
-        candidate = load_rag_retriever(params.rag, native_index_path=params.rag_index)
-        if candidate.backend_id() != "noop":
-            retriever = candidate
-    except Exception as exc:
-        _emit(f"(retrieval init failed: {exc})")
-        retriever = None
+    retriever, structure_retriever = _init_rag_retrievers(params)
 
     memory_store = open_memory_store(params.memory_db)
     memory_scope: MemoryScope | None = None
     if memory_store is not None:
         session_id = params.memory_session or _dt.datetime.now().strftime("session_%Y%m%d_%H%M%S")
         memory_scope = MemoryScope(session_id=session_id, user_id=params.memory_user)
+    memory_layer = open_memory_layer(memory_store, memory_scope, root)
+    memory_budget = budget_from_env(max(int(params.memory_recall_turns), 0))
 
     tts_opts = params.tts
     tts_instruct = tts_opts.tts_instruct
@@ -2931,6 +5291,7 @@ def prepare_chat_session(
         else None
     )
 
+    from harness import load_harness
     from integrations.shell.runner import ShellSession
 
     return _SessionState(
@@ -2945,10 +5306,15 @@ def prepare_chat_session(
         stats=stats,
         params=gen_params,
         retriever=retriever,
+        structure_retriever=structure_retriever,
         retrieval_top_k=max(int(params.rag_top_k), 1),
+        rag_adaptive=bool(getattr(params, "rag_adaptive", True)),
         memory=memory_store,
         memory_scope=memory_scope,
         memory_recall_turns=max(int(params.memory_recall_turns), 0),
+        memory_layer=memory_layer,
+        memory_budget=memory_budget,
+        skill_catalog=open_skill_catalog(root),
         tts_enabled=bool(tts_opts.tts_enabled),
         tts_plain_text=not bool(tts_opts.tts_raw_output),
         tts_model_id=str(tts_opts.tts_model),
@@ -2974,6 +5340,8 @@ def prepare_chat_session(
         server_model=None,
         shell_session=ShellSession(cwd=root.resolve()),
         tool_max_rounds=_tool_max_rounds_from_env(),
+        speech_store=_make_speech_store(memory_scope),
+        harness=load_harness(root),
     )
 
 
@@ -2989,7 +5357,7 @@ def should_eager_load_at_startup(
         return True
     if params.startup_preload:
         return True
-    env = os.environ.get("ORODRUIN_CHAT_PRELOAD", "").strip().lower()
+    env = os.environ.get("SOPHON_CHAT_PRELOAD", "").strip().lower()
     if env in ("1", "true", "yes"):
         return True
     from utils.device.platform import is_wsl, is_windows_mount_path
@@ -3006,7 +5374,7 @@ def prepare_chat_session_or_shell(
     *,
     on_load_progress: Callable[[int, int, str], None] | None = None,
 ) -> _SessionState:
-    root = orodruin_project_root()
+    root = sophon_project_root()
     try:
         backend_id = resolve_chat_backend()
     except ValueError as exc:
@@ -3015,10 +5383,6 @@ def prepare_chat_session_or_shell(
 
     if is_server_backend(backend_id):
         server_model = _pick_default_server_model(backend_id)
-        if server_model:
-            _emit(f"(chat backend={backend_id}; model={server_model})")
-        else:
-            _emit(f"(chat backend={backend_id}; no models listed yet)")
         return prepare_shell_chat_session(
             params,
             root,
@@ -3044,13 +5408,39 @@ def prepare_chat_session_or_shell(
 
 
 def chat_startup_lines(state: _SessionState) -> list[str]:
-    from cli.chat_display import chat_banner_lines
+    from cli.chat_display import chat_session_header_lines
 
-    return chat_banner_lines(state)
+    return [line.plain for line in chat_session_header_lines(state)]
+
+
+def _episode_summary_from_messages(messages: list[dict[str, object]]) -> tuple[str, int]:
+    user_turns = [str(m.get("content", "")).strip() for m in messages if m.get("role") == "user"]
+    assistant_turns = [str(m.get("content", "")).strip() for m in messages if m.get("role") == "assistant"]
+    turn_count = len(user_turns)
+    if turn_count == 0:
+        return "", 0
+    first = user_turns[0][:200]
+    last = user_turns[-1][:200] if turn_count > 1 else ""
+    tail = assistant_turns[-1][:200] if assistant_turns else ""
+    parts = [f"{turn_count} user turn(s). first: {first}"]
+    if last:
+        parts.append(f"last: {last}")
+    if tail:
+        parts.append(f"reply: {tail}")
+    return " | ".join(parts), turn_count
 
 
 def close_chat_session(state: _SessionState) -> None:
+    if state.sst_mic is not None:
+        try:
+            cancel_sst_recording(state)
+        except Exception:
+            pass
     _unload_model_weights(state)
+    if state.memory_layer is not None:
+        summary, turn_count = _episode_summary_from_messages(state.messages)
+        if turn_count > 0:
+            state.memory_layer.record_episode_on_close(summary, turn_count)
     if state.memory is not None:
         try:
             state.memory.close()
@@ -3091,6 +5481,8 @@ def run_chat(params: ChatCliParams) -> None:
                 print(file=sys.stderr)
                 break
             if raw_line.strip() == "":
+                if sst_recording(state):
+                    finish_sst_recording(state)
                 continue
             handled, should_generate = dispatch_chat_line(state, raw_line)
             if state.exit_requested:
@@ -3098,7 +5490,9 @@ def run_chat(params: ChatCliParams) -> None:
             if handled and not should_generate:
                 continue
             if not handled:
-                state.messages.append({"role": "user", "content": raw_line.rstrip()})
+                state.messages.append(
+                    {"role": "user", "content": prepare_user_message_text(state, raw_line)}
+                )
             run_chat_generation(state)
     finally:
         if state is not None:
@@ -3111,7 +5505,7 @@ def main() -> None:
 
     from cli.terminal import chat_command as _chat
 
-    _chat.main(args=_sys.argv[1:], prog_name="orodruin-chat-cli", standalone_mode=True)
+    _chat.main(args=_sys.argv[1:], prog_name="sophon-chat-cli", standalone_mode=True)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, ClassVar
 
 from textual import events
 from textual.app import ComposeResult
@@ -27,6 +27,17 @@ class MenuItem:
     disabled: bool = False
     separator_before: bool = False
     payload: str = ""
+    submenu: tuple["MenuItem", ...] = ()
+
+
+@dataclass(frozen=True)
+class _MenuRow:
+    action: str
+    payload: str
+    prompt: str
+    disabled: bool
+    separator_before: bool
+    toggle: bool
 
 
 @dataclass(frozen=True)
@@ -44,9 +55,7 @@ class MenuAction(Message):
         super().__init__()
 
 
-def _option_prompt(item: MenuItem, width: int = 30) -> str:
-    label = item.label
-    shortcut = item.shortcut
+def _option_prompt(label: str, shortcut: str = "", width: int = 36) -> str:
     if not shortcut:
         return f" {label}"
     pad = width - len(label) - len(shortcut) - 2
@@ -57,6 +66,8 @@ class MenuPopup(ModalScreen[tuple[str, str] | None]):
     BINDINGS = [
         Binding("escape", "cancel", "Close", show=False),
     ]
+    _DROP_W: ClassVar[int] = 40
+    _DROP_MAX_H: ClassVar[int] = 22
 
     DEFAULT_CSS = """
     MenuPopup {
@@ -66,9 +77,9 @@ class MenuPopup(ModalScreen[tuple[str, str] | None]):
     }
 
     #editor-menu-dropdown {
-        width: 34;
+        width: 40;
         height: auto;
-        max-height: 18;
+        max-height: 22;
         border: solid $primary;
         background: $surface;
         padding: 0;
@@ -79,42 +90,115 @@ class MenuPopup(ModalScreen[tuple[str, str] | None]):
         super().__init__()
         self._items = items
         self._origin = origin
+        self._expanded: set[str] = set()
+        self._rows: list[_MenuRow] = []
         self._index_map: list[tuple[str, str]] = []
 
-    def compose(self) -> ComposeResult:
-        options: list = []
-        self._index_map = []
+    def _flatten(self) -> list[_MenuRow]:
+        rows: list[_MenuRow] = []
         for item in self._items:
-            if item.separator_before:
+            if item.submenu:
+                opened = item.action in self._expanded
+                mark = "▾" if opened else "▸"
+                rows.append(
+                    _MenuRow(
+                        action=item.action,
+                        payload="",
+                        prompt=_option_prompt(f"{item.label}  {mark}"),
+                        disabled=item.disabled,
+                        separator_before=item.separator_before,
+                        toggle=True,
+                    )
+                )
+                if not opened:
+                    continue
+                for child in item.submenu:
+                    rows.append(
+                        _MenuRow(
+                            action=child.action,
+                            payload=child.payload,
+                            prompt=_option_prompt(f"  {child.label}", child.shortcut),
+                            disabled=child.disabled,
+                            separator_before=child.separator_before,
+                            toggle=False,
+                        )
+                    )
+                continue
+            rows.append(
+                _MenuRow(
+                    action=item.action,
+                    payload=item.payload,
+                    prompt=_option_prompt(item.label, item.shortcut),
+                    disabled=item.disabled,
+                    separator_before=item.separator_before,
+                    toggle=False,
+                )
+            )
+        return rows
+
+    def _listing_content(self) -> tuple[list, list[_MenuRow]]:
+        options: list = []
+        rows = self._flatten()
+        visible: list[_MenuRow] = []
+        for row in rows:
+            if row.separator_before:
                 if Separator is not None:
                     options.append(Separator())
                 else:
                     options.append(Option(" ──────────────", disabled=True))
-                self._index_map.append(("", ""))
+                visible.append(
+                    _MenuRow(
+                        action="",
+                        payload="",
+                        prompt="",
+                        disabled=True,
+                        separator_before=True,
+                        toggle=False,
+                    )
+                )
             options.append(
                 Option(
-                    _option_prompt(item),
-                    id=f"menu-item-{len(self._index_map)}",
-                    disabled=item.disabled,
+                    row.prompt,
+                    id=f"menu-item-{len(visible)}",
+                    disabled=row.disabled,
                 )
             )
-            self._index_map.append((item.action, item.payload))
-        yield OptionList(*options, id="editor-menu-dropdown")
+            visible.append(row)
+        return options, visible
 
-    def on_mount(self) -> None:
-        listing = self.query_one("#editor-menu-dropdown", OptionList)
-        count = max(len(self._index_map), 1)
-        listing.styles.height = min(count + 2, 18)
+    def _apply_rows(self, listing: OptionList, highlight: int | None = None) -> None:
+        options, rows = self._listing_content()
+        listing.clear_options()
+        listing.add_options(options)
+        self._rows = rows
+        self._index_map = [(row.action, row.payload) for row in rows]
+        self._place_dropdown(listing)
+        if highlight is not None and rows:
+            listing.highlighted = max(0, min(highlight, len(rows) - 1))
+
+    def _place_dropdown(self, listing: OptionList) -> None:
+        count = max(len(self._rows), 1)
+        drop_h = min(count + 2, self._DROP_MAX_H)
+        listing.styles.height = drop_h
         screen_w = self.size.width or (self.app.size.width if self.app.size else 80)
         screen_h = self.size.height or (self.app.size.height if self.app.size else 24)
-        drop_w = 34
-        drop_h = min(count + 2, 18)
+        drop_w = self._DROP_W
         x, y = self._origin
         if x + drop_w > screen_w:
             x = max(0, screen_w - drop_w)
         if y + drop_h > screen_h:
             y = max(0, self._origin[1] - drop_h - 1)
         listing.styles.offset = (max(0, x), max(0, y))
+
+    def compose(self) -> ComposeResult:
+        options, rows = self._listing_content()
+        self._rows = rows
+        self._index_map = [(row.action, row.payload) for row in rows]
+        yield OptionList(*options, id="editor-menu-dropdown")
+
+    def on_mount(self) -> None:
+        listing = self.query_one("#editor-menu-dropdown", OptionList)
+        self._place_dropdown(listing)
         listing.focus()
 
     def action_cancel(self) -> None:
@@ -134,13 +218,23 @@ class MenuPopup(ModalScreen[tuple[str, str] | None]):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         index = event.option_index
-        if index < 0 or index >= len(self._index_map):
+        if index < 0 or index >= len(self._rows):
             self.dismiss(None)
             return
-        action, payload = self._index_map[index]
-        if not action:
+        row = self._rows[index]
+        if row.toggle:
+            event.stop()
+            if row.action in self._expanded:
+                self._expanded.discard(row.action)
+            else:
+                self._expanded.add(row.action)
+            listing = self.query_one("#editor-menu-dropdown", OptionList)
+            self._apply_rows(listing, highlight=index)
+            listing.focus()
             return
-        self.dismiss((action, payload))
+        if not row.action:
+            return
+        self.dismiss((row.action, row.payload))
 
 
 class PaneMenuBar(Horizontal):
@@ -190,7 +284,7 @@ class PaneMenuBar(Horizontal):
         self._title = title
         self._menus = menus
         self._open_button: Button | None = None
-        # TODO: hover-switch between open menus, Alt/F10 keyboard access, nested submenus
+        # TODO: hover-switch between open menus, Alt/F10 keyboard access, flyout nested submenus
 
     def compose(self) -> ComposeResult:
         for group in self._menus():

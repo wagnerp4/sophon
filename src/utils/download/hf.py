@@ -20,32 +20,75 @@ from tqdm.auto import tqdm as TqdmAuto
 from backend.hf.registry import HF_MODEL_PRESETS, resolve_preset_dir
 
 
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".incomplete", ".part")
+_FILE_COUNT_TOTAL_MAX = 4096
+_SIZE_GIB_RE = re.compile(r"~(\d+(?:\.\d+)?)\s*GiB", re.IGNORECASE)
+
+
 def scan_local_dir_download_bytes(local_dir: Path) -> int:
     total = 0
     if not local_dir.is_dir():
         return 0
-    cache_download = local_dir / ".cache" / "huggingface" / "download"
-    if cache_download.is_dir():
-        for path in cache_download.iterdir():
+    seen: set[str] = set()
+
+    def add_file(path: Path) -> None:
+        nonlocal total
+        try:
+            key = str(path.resolve())
+        except OSError:
+            return
+        if key in seen or not path.is_file():
+            return
+        seen.add(key)
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+
+    cache_root = local_dir / ".cache"
+    if cache_root.is_dir():
+        for path in cache_root.rglob("*"):
             if path.is_file():
-                try:
-                    total += path.stat().st_size
-                except OSError:
-                    pass
-    for name in ("model.safetensors", "pytorch_model.bin"):
-        weight = local_dir / name
-        if weight.is_file():
-            try:
-                total += weight.stat().st_size
-            except OSError:
-                pass
+                add_file(path)
+    try:
+        entries = list(local_dir.iterdir())
+    except OSError:
+        entries = []
+    for path in entries:
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        if name.endswith(_WEIGHT_SUFFIXES):
+            add_file(path)
     for shard in local_dir.glob("model-*-of-*.safetensors"):
-        if shard.is_file():
-            try:
-                total += shard.stat().st_size
-            except OSError:
-                pass
+        add_file(shard)
     return total
+
+
+def probe_hub_snapshot_bytes(repo_id: str) -> int:
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo_id, files_metadata=True)
+    except Exception:
+        return 0
+    total = 0
+    for sibling in getattr(info, "siblings", None) or []:
+        size = getattr(sibling, "size", None)
+        if size is None:
+            continue
+        try:
+            total += int(size)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def parse_hub_size_hint(text: str) -> int:
+    match = _SIZE_GIB_RE.search(text)
+    if match is None:
+        return 0
+    return int(float(match.group(1)) * (2**30))
 
 
 @contextmanager
@@ -53,19 +96,21 @@ def watch_local_download_bytes(
     local_dir: Path,
     on_disk_bytes: Callable[[int], None],
     *,
-    interval_s: float = 2.0,
+    interval_s: float = 0.5,
 ) -> Iterator[None]:
     stop = threading.Event()
 
     def poll() -> None:
         last = -1
-        while not stop.wait(interval_s):
+        while not stop.is_set():
             nbytes = scan_local_dir_download_bytes(local_dir)
-            if nbytes > 0 and nbytes != last:
+            if nbytes != last:
                 last = nbytes
                 on_disk_bytes(nbytes)
+            if stop.wait(interval_s):
+                break
 
-    thread = threading.Thread(target=poll, name="orodruin-download-watch", daemon=True)
+    thread = threading.Thread(target=poll, name="sophon-download-watch", daemon=True)
     thread.start()
     try:
         yield
@@ -90,11 +135,28 @@ def format_byte_count(value: int | float) -> str:
 
 def format_byte_progress_pair(n: int, total: int) -> str:
     if total > 0:
-        pct = min(100, int((n / total) * 100))
-        return f"{format_byte_count(n)} / {format_byte_count(total)} ({pct}%)"
+        return f"{format_byte_count(n)} / {format_byte_count(total)}"
     if n > 0:
         return format_byte_count(n)
     return "0 B"
+
+
+def format_percent(n: int, total: int) -> str:
+    if total <= 0:
+        return "?%"
+    pct = min(100.0, max(0.0, (float(n) / float(total)) * 100.0))
+    return f"{pct:.1f}%"
+
+
+def format_eta_s(seconds: float) -> str:
+    total = int(max(0, seconds))
+    if total < 60:
+        return f"{total}s"
+    mins, secs = divmod(total, 60)
+    if mins < 60:
+        return f"{mins}m {secs:02d}s"
+    hours, rem = divmod(mins, 60)
+    return f"{hours}h {rem}m"
 
 
 def format_progress_bar(n: int, total: int, width: int = 20) -> str:
@@ -102,6 +164,32 @@ def format_progress_bar(n: int, total: int, width: int = 20) -> str:
         return "░" * width
     filled = min(width, int((n / total) * width))
     return ("█" * filled) + ("░" * (width - filled))
+
+
+def format_download_bar_line(
+    n: int,
+    total: int,
+    *,
+    bytes_per_s: float = 0.0,
+    file_count: bool = False,
+) -> str:
+    bar = format_progress_bar(n, total)
+    pct = format_percent(n, total)
+    if file_count:
+        if total > 0:
+            return f"[{bar}] {pct} · {n} / {total} files"
+        return f"[{bar}] {pct} · enumerating repo files on Hub"
+    detail = format_byte_progress_pair(n, total)
+    parts = [f"[{bar}] {pct} · {detail}"]
+    if bytes_per_s > 0:
+        parts.append(f"{format_byte_count(bytes_per_s)}/s")
+        if total > n:
+            parts.append(f"ETA {format_eta_s((total - n) / bytes_per_s)}")
+    elif n <= 0:
+        parts.append("no bytes on disk yet")
+    else:
+        parts.append("size unchanged")
+    return " · ".join(parts)
 
 
 def normalize_hub_phase(desc: str) -> str:
@@ -120,14 +208,13 @@ def normalize_hub_phase(desc: str) -> str:
 def is_file_count_progress(n: int, total: int, desc: str) -> bool:
     if desc.startswith("Fetching "):
         return True
-    return total > 0 and total <= 4096 and n <= total
+    if " files" in desc.lower():
+        return True
+    return total > 0 and total <= _FILE_COUNT_TOTAL_MAX and n <= total and n <= _FILE_COUNT_TOTAL_MAX
 
 
 def format_idle_download_hint() -> str:
-    return (
-        "no bytes yet — after xet-read-token, the ~22 GiB shard can take several minutes "
-        "to begin streaming"
-    )
+    return format_download_bar_line(0, 0)
 
 
 def split_hub_progress_label(label: str) -> tuple[str, str]:
@@ -138,13 +225,24 @@ def split_hub_progress_label(label: str) -> tuple[str, str]:
     return normalize_hub_phase(text), format_byte_progress_pair(0, 0)
 
 
-def format_download_progress(n: int, total: int, desc: str = "") -> str:
+def format_download_progress(
+    n: int,
+    total: int,
+    desc: str = "",
+    *,
+    bytes_per_s: float = 0.0,
+) -> str:
     phase = normalize_hub_phase(desc)
-    detail = format_byte_progress_pair(n, total)
-    bar = format_progress_bar(n, total)
+    file_count = is_file_count_progress(n, total, desc)
+    detail = format_download_bar_line(
+        n,
+        total,
+        bytes_per_s=0.0 if file_count else bytes_per_s,
+        file_count=file_count,
+    )
     if phase:
-        return f"{phase}\n[{bar}] {detail}"
-    return f"[{bar}] {detail}"
+        return f"{phase}\n{detail}"
+    return detail
 
 
 def _format_hub_log_line(logger_name: str, message: str) -> str | None:
@@ -300,9 +398,9 @@ def hub_tqdm_bridge_factory(
             if kwargs.get("file") is None:
                 kwargs["file"] = open(os.devnull, "w", encoding="utf-8")
             super().__init__(*args, **kwargs)
-            self._orodruin_emit()
+            self._sophon_emit()
 
-        def _orodruin_total_n(self) -> tuple[int, int]:
+        def _sophon_total_n(self) -> tuple[int, int]:
             tot_raw = getattr(self, "total", None)
             if tot_raw is None or (isinstance(tot_raw, float) and math.isnan(tot_raw)):
                 total = 0
@@ -312,8 +410,8 @@ def hub_tqdm_bridge_factory(
             n = max(0, int(n_raw))
             return n, total
 
-        def _orodruin_emit(self) -> None:
-            n, total = self._orodruin_total_n()
+        def _sophon_emit(self) -> None:
+            n, total = self._sophon_total_n()
             desc = str(getattr(self, "desc", "") or "").strip()
             unit = str(getattr(self, "unit", "") or "")
             unit_scale = bool(getattr(self, "unit_scale", False))
@@ -336,20 +434,20 @@ def hub_tqdm_bridge_factory(
 
         def update(self, n: int | float | None = 1) -> bool | None:
             r = super().update(n)
-            self._orodruin_emit()
+            self._sophon_emit()
             return r
 
         def refresh(self, nolock: bool = False, lock_args=None) -> None:
             super().refresh(nolock=nolock, lock_args=lock_args)
-            self._orodruin_emit()
+            self._sophon_emit()
 
         def set_description(self, desc: str | None = None, refresh: bool = True) -> None:
             super().set_description(desc, refresh=refresh)
-            self._orodruin_emit()
+            self._sophon_emit()
 
         def close(self) -> None:
             try:
-                self._orodruin_emit()
+                self._sophon_emit()
             finally:
                 super().close()
 
@@ -365,6 +463,7 @@ def snapshot_hf_files(
     verbose: bool,
     preset_key_for_log: str | None = None,
     on_status: Callable[[str], None] | None = None,
+    on_expected_bytes: Callable[[int], None] | None = None,
 ) -> Path:
     resolved = local_dir.expanduser().resolve()
     kwargs: dict[str, object] = {
@@ -381,23 +480,33 @@ def snapshot_hf_files(
     if on_status is not None:
         on_status(f"resolving {repo_id} on Hugging Face Hub")
         on_status(f"target directory: {resolved}")
+        on_status("querying Hub for snapshot size")
+    expected = probe_hub_snapshot_bytes(repo_id)
+    if expected > 0:
+        if on_status is not None:
+            on_status(f"snapshot size {format_byte_count(expected)}")
+        if on_expected_bytes is not None:
+            on_expected_bytes(expected)
+    elif on_status is not None:
+        on_status("Hub did not return file sizes yet. Progress uses on-disk bytes until tqdm reports a total")
+    if on_status is not None:
         on_status("fetching repo metadata and file list (first contact can take minutes)")
     if verbose:
         if preset_key_for_log is not None:
             print(
-                f"orodruin: Hub pull preset={preset_key_for_log!r} repo_id={repo_id!r}",
+                f"sophon: Hub pull preset={preset_key_for_log!r} repo_id={repo_id!r}",
                 file=sys.stderr,
                 flush=True,
             )
-            print(f"orodruin: local_dir={resolved}", file=sys.stderr, flush=True)
+            print(f"sophon: local_dir={resolved}", file=sys.stderr, flush=True)
         else:
             print(
-                f"orodruin: Hub pull repo_id={repo_id!r} local_dir={resolved}",
+                f"sophon: Hub pull repo_id={repo_id!r} local_dir={resolved}",
                 file=sys.stderr,
                 flush=True,
             )
         print(
-            "orodruin: calling snapshot_download (repo metadata and file list can take minutes on first contact)…",
+            "sophon: calling snapshot_download (repo metadata and file list can take minutes on first contact)…",
             file=sys.stderr,
             flush=True,
         )
@@ -405,7 +514,7 @@ def snapshot_hf_files(
     if on_status is not None:
         on_status("snapshot_download finished")
     if verbose:
-        print("orodruin: snapshot_download finished.", file=sys.stderr, flush=True)
+        print("sophon: snapshot_download finished.", file=sys.stderr, flush=True)
     return resolved
 
 
@@ -415,6 +524,7 @@ def download_preset_snapshot(
     *,
     verbose: bool = False,
     on_status: Callable[[str], None] | None = None,
+    on_expected_bytes: Callable[[int], None] | None = None,
 ) -> Path:
     if preset_key not in HF_MODEL_PRESETS:
         raise ValueError(f"Unknown preset: {preset_key!r}")
@@ -435,6 +545,7 @@ def download_preset_snapshot(
         verbose=verbose,
         preset_key_for_log=preset_key,
         on_status=on_status,
+        on_expected_bytes=on_expected_bytes,
     )
 
 

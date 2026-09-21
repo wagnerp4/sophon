@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 from textual.widgets import Static
 
-from utils.device.env_bootstrap import orodruin_project_root
+from utils.device.env_bootstrap import sophon_project_root
 
 
 @dataclass
@@ -76,7 +76,7 @@ class BaseTile:
 
 
 def dashboard_cache_dir() -> Path:
-    path = orodruin_project_root() / "data" / "dashboard"
+    path = sophon_project_root() / "data" / "dashboard"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -114,7 +114,7 @@ def save_cached_state(tile_id: str, state: TileState) -> None:
 
 
 def http_get_json(url: str, *, timeout_s: float = 12.0, headers: dict[str, str] | None = None) -> Any:
-    hdrs = {"User-Agent": "orodruin-dashboard/0.1"}
+    hdrs = {"User-Agent": "sophon-dashboard/0.1"}
     if headers:
         hdrs.update(headers)
     req = Request(url, headers=hdrs)
@@ -124,7 +124,7 @@ def http_get_json(url: str, *, timeout_s: float = 12.0, headers: dict[str, str] 
 
 
 def http_get_text(url: str, *, timeout_s: float = 12.0, headers: dict[str, str] | None = None) -> str:
-    hdrs = {"User-Agent": "orodruin-dashboard/0.1"}
+    hdrs = {"User-Agent": "sophon-dashboard/0.1"}
     if headers:
         hdrs.update(headers)
     req = Request(url, headers=hdrs)
@@ -142,7 +142,7 @@ def http_post_form(
     from urllib.parse import urlencode
 
     hdrs = {
-        "User-Agent": "orodruin-dashboard/0.1",
+        "User-Agent": "sophon-dashboard/0.1",
         "Content-Type": "application/x-www-form-urlencoded",
     }
     if headers:

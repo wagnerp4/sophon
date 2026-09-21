@@ -43,9 +43,9 @@ def dispatch(
         if desktop_terminal_available():
             raise SystemExit(launch_tui_in_new_terminal(user_argv))
         print(
-            "[orodruin] No desktop terminal emulator found; running TUI in this terminal.",
+            "[sophon] No desktop terminal emulator found; running TUI in this terminal.",
             flush=True,
         )
-        print("[orodruin] Tip: use --no-spawn-window to skip this message.", flush=True)
+        print("[sophon] Tip: use --no-spawn-window to skip this message.", flush=True)
 
     textual.run(params)

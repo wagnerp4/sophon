@@ -1,4 +1,5 @@
 .venv/
+.venv-wsl/
 venv/
 __pycache__/
 *.py[cod]
@@ -19,3 +20,7 @@ data/*
 !data/benchmarks/**
 evaluation_runs/
 data/exps/
+
+.sophon/memory/scratch/
+.sophon/memory/MEMORY-STATE.md
+.sophon/harness.local.yaml

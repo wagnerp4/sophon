@@ -50,7 +50,7 @@ DEFAULT_TILES = (
 
 
 def configured_tile_ids() -> list[str]:
-    raw = os.environ.get("ORODRUIN_DASHBOARD_TILES", "").strip()
+    raw = os.environ.get("SOPHON_DASHBOARD_TILES", "").strip()
     if not raw:
         return list(DEFAULT_TILES)
     ids = [part.strip().lower() for part in raw.split(",") if part.strip()]

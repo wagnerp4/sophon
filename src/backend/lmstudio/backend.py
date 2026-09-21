@@ -14,13 +14,13 @@ _DEFAULT_BASE = "http://127.0.0.1:1234/v1"
 
 def lmstudio_base_url() -> str:
     return openai_compat_base_url(
-        ("ORODRUIN_LM_STUDIO_HOST", "LM_STUDIO_HOST"),
+        ("SOPHON_LM_STUDIO_HOST", "LM_STUDIO_HOST"),
         _DEFAULT_BASE,
     )
 
 
 def lmstudio_api_key() -> str | None:
-    for key in ("ORODRUIN_LM_STUDIO_API_KEY", "LM_STUDIO_API_KEY"):
+    for key in ("SOPHON_LM_STUDIO_API_KEY", "LM_STUDIO_API_KEY"):
         raw = os.environ.get(key, "").strip()
         if raw:
             return raw
@@ -59,7 +59,7 @@ def chat_complete(
     if timeout_s is not None:
         deadline = float(timeout_s)
     else:
-        raw = os.environ.get("ORODRUIN_LM_STUDIO_TIMEOUT_S", "").strip()
+        raw = os.environ.get("SOPHON_LM_STUDIO_TIMEOUT_S", "").strip()
         if raw:
             deadline = float(raw)
     result = chat_completions(

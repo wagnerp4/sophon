@@ -4,7 +4,9 @@ import datetime as _dt
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 from textual import events
@@ -16,13 +18,10 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
-    Footer,
-    Header,
     Input,
     Label,
     ListItem,
     ListView,
-    RichLog,
     Static,
 )
 
@@ -40,21 +39,26 @@ from cli.chat import (
     dispatch_chat_line,
     format_chat_help,
     prepare_chat_session_or_shell,
+    play_speech_clip,
     reset_chat_io,
     run_chat_generation,
+    sst_recording,
     switch_session_model,
     transcribe_audio_paths,
 )
 from cli.chat_display import (
-    TranscriptLine,
-    chat_banner_transcript_lines,
-    format_assistant_body_line,
-    format_assistant_turn_header,
-    format_system_line,
+    SESSION_SEPARATOR,
+    chat_prompt_placeholder,
+    chat_session_header_lines,
+    format_speech_clip_line,
+    nexus_wordmark_markup,
+    format_turn_trace_lines,
     format_user_turn_line,
+    unpack_assistant_pending,
 )
 from cli.host.session_log import TuiSessionLog
-from cli.tui.io import TuiStderrSink
+from cli.tui.footer import NexusFooter
+from cli.tui.io import TuiStderrSink, copy_text_to_system_clipboard
 from cli.tui.paste_drop import (
     build_message_with_attachments,
     describe_dropped_paths,
@@ -64,41 +68,45 @@ from cli.tui.paste_drop import (
     split_audio_paths,
 )
 from cli.tui.screens.dashboard import DashboardScreen
+from cli.tui.screens.editor import EditorScreen
 from cli.tui.screens.nav import (
     CHAT_TITLE,
     DASHBOARD_TITLE,
     EDITOR_TITLE,
     MODE_CYCLE,
     NAV_BINDINGS,
-    WORKSHOP_TITLE,
     ModeNavigationMixin,
-    compose_nav_bar,
 )
-from cli.tui.screens.editor import EditorScreen
-from cli.tui.screens.workshop import WorkshopScreen
-from utils.device.env_bootstrap import orodruin_project_root
+from cli.tui.chat_prompt import FilesDropped
+from cli.tui.keybinds import CHAT_KEYBIND_ACTIONS, SlashDispatchMixin, apply_keybinds, load_keybinds
+from cli.path_highlights import ensure_highlights_file
+from cli.tui.permission import PermissionPrompt
+from cli.tui.setup_prompt import SETUP_SKIP, SetupPrompt
+from cli.tui.speech import ChatLogPane, ChatTranscript, PushToTalkMixin, TranscriptHostMixin
+from utils.device.env_bootstrap import sophon_project_root
 from utils.download.hf import (
     capture_hub_download_logs,
     capture_hub_user_warnings,
     download_preset_snapshot,
-    format_byte_progress_pair,
+    format_download_bar_line,
     format_download_progress,
-    format_idle_download_hint,
-    format_progress_bar,
     hub_tqdm_bridge_factory,
     is_file_count_progress,
     normalize_hub_phase,
+    parse_hub_size_hint,
+    scan_local_dir_download_bytes,
     split_hub_progress_label,
     throttled_progress_callback,
     watch_local_download_bytes,
 )
 
 
+HUB_BYTE_TOTAL_MIN = 4097
 _MODELS_CMD = re.compile(r"^/models(?:\s+(all|local|missing))?\s*$", re.IGNORECASE)
 
 
 def _set_console_title(title: str) -> None:
-    if sys.platform == "win32" and os.environ.get("ORODRUIN_TUI_CHILD"):
+    if sys.platform == "win32" and os.environ.get("SOPHON_TUI_CHILD"):
         try:
             os.system(f"title {title}")
         except Exception:
@@ -115,6 +123,9 @@ def _format_action_elapsed(seconds: float) -> str:
     hours, rem = divmod(total, 3600)
     mins, _ = divmod(rem, 60)
     return f"{hours}h {mins}m"
+
+
+_ELAPSED_SUFFIX_RE = re.compile(r" · (?:\d+s|\d+m \d{2}s|\d+h \d+m)$")
 
 
 class ModelItemDoubleClicked(Message):
@@ -137,28 +148,21 @@ class TurnComplete(Message):
     pass
 
 
-class FilesDropped(Message):
-    def __init__(self, paths: list[Path]) -> None:
-        self.paths = paths
-        super().__init__()
-
-
-class ChatPromptInput(Input):
-    def _on_paste(self, event: events.Paste) -> None:
-        paths = extract_dropped_paths(event.text)
-        if paths:
-            event.stop()
-            self.post_message(FilesDropped(paths))
-            return
-        super()._on_paste(event)
-
-
 class LoadProgress(Message):
-    def __init__(self, status: str, *, n: int = 0, total: int = 0, phase: str = "") -> None:
+    def __init__(
+        self,
+        status: str,
+        *,
+        n: int = 0,
+        total: int = 0,
+        phase: str = "",
+        bytes_per_s: float = 0.0,
+    ) -> None:
         self.status = status
         self.n = n
         self.total = total
         self.phase = phase
+        self.bytes_per_s = bytes_per_s
         super().__init__()
 
 
@@ -169,12 +173,14 @@ class HubLogLine(Message):
 
 
 class ModelListItem(ListItem):
-    _NON_SELECTABLE = frozenset({"header", "group", "subgroup"})
+    _NON_SELECTABLE = frozenset({"group", "subgroup"})
 
-    def __init__(self, entry: ModelPickerEntry) -> None:
+    def __init__(self, entry: ModelPickerEntry, *, expanded: bool = False) -> None:
         self.entry = entry
         if entry.kind == "header":
-            super().__init__(Label(f"[bold]{entry.title}[/bold]"), disabled=True)
+            arrow = "▾" if expanded and entry.child_count > 0 else "▸"
+            extra = f"  {entry.detail}" if entry.detail else ""
+            super().__init__(Label(f"[bold]{arrow} {entry.title}{extra}[/bold]"))
             return
         if entry.kind == "group":
             super().__init__(Label(f"[bold dim]{entry.title}[/bold dim]"), disabled=True)
@@ -183,13 +189,17 @@ class ModelListItem(ListItem):
             super().__init__(Label(f"[dim]  {entry.title}[/dim]"), disabled=True)
             return
         if entry.local:
-            marker = "▸ " if entry.current else "  "
+            marker = "  ▸ " if entry.current else "    "
         else:
-            marker = "    ▸ " if entry.current else "    "
+            marker = "      ▸ " if entry.current else "      "
         suffix = "" if entry.local else " [dim]remote[/dim]"
         super().__init__(Label(f"{marker}{entry.title}{suffix}"))
 
     def on_click(self, event: events.Click) -> None:
+        if event.chain >= 2 and self.entry.kind == "header":
+            self.post_message(ModelItemDoubleClicked(self.entry))
+            event.stop()
+            return
         if event.chain >= 2 and self.entry.kind not in self._NON_SELECTABLE:
             self.post_message(ModelItemDoubleClicked(self.entry))
             event.stop()
@@ -199,53 +209,115 @@ class ModelPickerScreen(ModalScreen[ModelPickerEntry | None]):
     BINDINGS = [
         Binding("escape", "cancel", "Close", show=True),
         Binding("ctrl+m", "cancel", "Close", show=False),
+        Binding("left", "collapse_group", "Collapse", show=False),
+        Binding("right", "expand_group", "Expand", show=False),
     ]
 
     def __init__(self, entries: list[ModelPickerEntry]) -> None:
         super().__init__()
         self._entries = entries
+        self._expanded = {entry.group for entry in entries if entry.current and entry.group}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-picker-dialog"):
-            yield Static("Models — ↑↓ move · Enter load/download · Esc close", id="model-picker-title")
+            yield Static(
+                "Models — ↑↓ move · Enter expand/load · ←/→ groups · Esc close",
+                id="model-picker-title",
+            )
             yield ListView(id="model-picker-list")
-            yield Static("Click or Enter to select", id="model-picker-hint")
+            yield Static("Enter on a group to expand. Enter on a model to load.", id="model-picker-hint")
 
     def on_mount(self) -> None:
+        self._fill_list()
+
+    def _visible_entries(self) -> list[ModelPickerEntry]:
+        visible: list[ModelPickerEntry] = []
+        for entry in self._entries:
+            if entry.kind == "header":
+                visible.append(entry)
+                continue
+            if entry.group and entry.group in self._expanded:
+                visible.append(entry)
+        return visible
+
+    def _fill_list(self, *, focus_group: str | None = None) -> None:
         panel = self.query_one("#model-picker-list", ListView)
         panel.clear()
-        if not self._entries:
+        visible = self._visible_entries()
+        if not visible:
             panel.append(ListItem(Label("[dim]no models[/dim]"), disabled=True))
             return
         highlight_index = 0
-        for entry in self._entries:
-            panel.append(ModelListItem(entry))
-            if entry.current:
-                highlight_index = len(panel.children) - 1
+        for index, entry in enumerate(visible):
+            opened = entry.group in self._expanded
+            panel.append(ModelListItem(entry, expanded=opened))
+            if focus_group and entry.kind == "header" and entry.group == focus_group:
+                highlight_index = index
+            elif entry.current and entry.group in self._expanded:
+                highlight_index = index
         panel.index = highlight_index
         panel.focus()
+
+    def _highlighted_entry(self) -> ModelPickerEntry | None:
+        panel = self.query_one("#model-picker-list", ListView)
+        index = panel.index
+        visible = self._visible_entries()
+        if index is None or index < 0 or index >= len(visible):
+            return None
+        return visible[index]
+
+    def _toggle_group(self, group: str, child_count: int) -> None:
+        if not group or child_count <= 0:
+            return
+        if group in self._expanded:
+            self._expanded.discard(group)
+        else:
+            self._expanded.add(group)
+        self._fill_list(focus_group=group)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def action_collapse_group(self) -> None:
+        entry = self._highlighted_entry()
+        if entry is None or not entry.group:
+            return
+        self._expanded.discard(entry.group)
+        self._fill_list(focus_group=entry.group)
+
+    def action_expand_group(self) -> None:
+        entry = self._highlighted_entry()
+        if entry is None or not entry.group:
+            return
+        self._expanded.add(entry.group)
+        self._fill_list(focus_group=entry.group)
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         item = event.item
-        if isinstance(item, ModelListItem) and item.entry.kind not in ModelListItem._NON_SELECTABLE:
+        if not isinstance(item, ModelListItem):
+            return
+        if item.entry.kind == "header":
+            self._toggle_group(item.entry.group, item.entry.child_count)
+            return
+        if item.entry.kind not in ModelListItem._NON_SELECTABLE:
             self.dismiss(item.entry)
 
     def on_model_item_double_clicked(self, event: ModelItemDoubleClicked) -> None:
+        if event.entry.kind == "header":
+            self._toggle_group(event.entry.group, event.entry.child_count)
+            return
         if event.entry.kind not in ModelListItem._NON_SELECTABLE:
             self.dismiss(event.entry)
 
 
-class ChatScreen(ModeNavigationMixin, Screen):
+class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeNavigationMixin, Screen):
     BINDINGS = [
         Binding("f1", "show_help", "Help", show=True),
         Binding("ctrl+p", "command_palette", "Palette", show=True),
         Binding("ctrl+m", "open_models", "Models", show=True),
         *NAV_BINDINGS,
-        Binding("ctrl+y", "copy_transcript", "Copy", show=True),
-        Binding("ctrl+l", "listen", "Listen", show=True, priority=True),
+        Binding("ctrl+y", "copy_chat", "Copy", show=False),
+        Binding("ctrl+l", "listen", "Speak", show=False, priority=True),
         Binding("ctrl+shift+t", "focus_transcript", "Log", show=True),
         Binding("tab", "cycle_focus", "Focus", show=False),
         Binding("escape", "focus_prompt", "Input", show=True),
@@ -255,17 +327,17 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def __init__(self) -> None:
         super().__init__()
+        self._init_transcript_host()
         self._focus_target = "prompt"
         self._started = False
         self._busy = False
         self._pending_download: ModelPickerEntry | None = None
-        self._transcript_plain: list[str] = []
-        self._turn_counter = 0
         self._session_started_at = _dt.datetime.now()
         self._picker_open = False
-        self._spinner_i = 0
         self._activity_kind = ""
         self._dropped_paths: list[Path] = []
+        self._mic_hold_started = False
+        self._mic_transcribing = False
 
     def _query_widget(self, selector: str, widget_type: type):
         try:
@@ -273,53 +345,57 @@ class ChatScreen(ModeNavigationMixin, Screen):
         except NoMatches:
             return None
 
-    def _format_status_text(self, text: str) -> str:
-        app = self.app
-        if isinstance(app, OrodruinTuiApp):
-            return app.format_with_elapsed(text)
-        return text
-
     def _update_status_bar(self, text: str) -> None:
         status = self._query_widget("#status-bar", Static)
-        if status is not None:
-            status.update(self._format_status_text(text))
+        if status is None:
+            return
+        body = text if text else ""
+        status.update(body)
+        status.display = bool(body.strip())
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield from compose_nav_bar("chat")
         with Vertical(id="chat-column"):
-            yield Static("", id="chat-banner")
-            with Horizontal(id="chat-toolbar"):
-                yield Static("chat", id="chat-toolbar-title")
-                yield Button("Copy", id="chat-copy", variant="default")
-            yield RichLog(id="transcript", highlight=True, markup=True, wrap=True, auto_scroll=True)
+            yield Static(nexus_wordmark_markup(), id="chat-toolbar-title", markup=True)
+            yield ChatLogPane(transcript_id="transcript", prompt_id="prompt")
             with Vertical(id="progress-panel"):
                 yield Static("", id="download-phase")
                 yield Static("", id="download-bar")
-            yield Static("Loading model...", id="status-bar")
-            yield ChatPromptInput(
-                placeholder="Message, /command, or drop a file (Enter to send)",
-                id="prompt",
-                disabled=True,
-            )
-        yield Footer()
+                yield Static("", id="train-curve")
+            yield Static("", id="status-bar")
+        yield NexusFooter(chat_actions=True)
 
     def on_mount(self) -> None:
         panel = self._query_widget("#progress-panel", Vertical)
         if panel is not None:
             panel.display = False
         self.refresh_from_state()
+        ensure_highlights_file(sophon_project_root())
+        self._apply_chat_keybinds()
         self.set_interval(0.25, self._tick_action_elapsed)
+
+    def on_screen_resume(self) -> None:
+        self._apply_chat_keybinds()
+
+    def _apply_chat_keybinds(self) -> None:
+        apply_keybinds(
+            self,
+            load_keybinds(sophon_project_root()),
+            actions=CHAT_KEYBIND_ACTIONS,
+        )
 
     def _tick_action_elapsed(self) -> None:
         app = self.app
-        if not isinstance(app, OrodruinTuiApp):
+        if not isinstance(app, SophonTuiApp):
             return
         if self._busy:
             if app.load_progress_total > 0 or app.load_progress_n > 0:
                 self.update_load_status()
             else:
                 self._show_activity_panel()
+            self._pulse_heartbeat()
+            return
+        if self.sst_recording():
+            self._update_status_bar(self._status_text())
             return
         if app._action_started_at is None:
             return
@@ -328,7 +404,7 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def refresh_from_state(self) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         if self._query_widget("#status-bar", Static) is None:
             return
         if app.session_error:
@@ -341,13 +417,13 @@ class ChatScreen(ModeNavigationMixin, Screen):
             if prompt is not None:
                 prompt.disabled = True
             return
-        self._render_chat_banner()
         if not self._started:
-            log_path = str(app.session_log.path) if app.session_log is not None else None
+            for line in chat_session_header_lines(app.session_state, for_markup=True):
+                if line.plain:
+                    self._write_transcript(line)
+            self._append_system(SESSION_SEPARATOR)
             stamp = self._session_started_at.strftime("%Y-%m-%d %H:%M:%S")
             self._append_system(f"session started {stamp}")
-            if log_path:
-                self._append_system(f"log {log_path}")
             self._started = True
         pending_sys = app._pending_system_lines
         if pending_sys:
@@ -356,47 +432,26 @@ class ChatScreen(ModeNavigationMixin, Screen):
             pending_sys.clear()
         pending_asst = app._pending_assistant_lines
         if pending_asst:
-            for text in list(pending_asst):
-                self._append_assistant(text)
+            for item in list(pending_asst):
+                text, trace = unpack_assistant_pending(item)
+                self._append_assistant(text, trace)
             pending_asst.clear()
+        pending_clips = app._pending_speech_clips
+        if pending_clips:
+            for clip in list(pending_clips):
+                self.append_speech_clip(clip)
+            pending_clips.clear()
         self._hide_progress_panel()
         prompt = self._query_widget("#prompt", Input)
         if prompt is not None:
             prompt.disabled = False
+            prompt.placeholder = chat_prompt_placeholder(app.session_state)
         self._update_status_bar(self._status_text())
         self.call_after_refresh(self._focus_prompt)
 
-    def _banner_width(self) -> int:
-        banner = self._query_widget("#chat-banner", Static)
-        if banner is not None and banner.size.width > 8:
-            return max(int(banner.size.width) - 2, 40)
-        column = self._query_widget("#chat-column", Vertical)
-        if column is not None and column.size.width > 8:
-            return max(int(column.size.width) - 4, 40)
-        if self.size.width:
-            return max(int(self.size.width) - 6, 40)
-        return 80
-
-    def _render_chat_banner(self) -> None:
-        app = self.app
-        assert isinstance(app, OrodruinTuiApp)
-        banner = self._query_widget("#chat-banner", Static)
-        state = app.session_state
-        if banner is None or state is None:
-            return
-        lines = chat_banner_transcript_lines(
-            state,
-            log_path=None,
-            started_at=self._session_started_at,
-            for_markup=True,
-            width=self._banner_width(),
-        )
-        markup = "\n".join(line.markup for line in lines if line.plain or line.markup)
-        banner.update(markup)
-
     def update_load_status(self) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         if app.session_state is not None and not self._busy:
             self._hide_progress_panel()
             self._update_status_bar(self._status_text())
@@ -426,10 +481,15 @@ class ChatScreen(ModeNavigationMixin, Screen):
         panel = self._query_widget("#progress-panel", Vertical)
         if panel is not None:
             panel.display = False
+            panel.styles.height = 2
+        curve = self._query_widget("#train-curve", Static)
+        if curve is not None:
+            curve.update("")
+            curve.display = False
 
     def _activity_label(self) -> str:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
         frame = frames[self._spinner_i % len(frames)]
         self._spinner_i += 1
@@ -457,16 +517,43 @@ class ChatScreen(ModeNavigationMixin, Screen):
         panel.display = True
         label = self._activity_label()
         phase_widget.update(label)
+        app = self.app
         if "download" in kind:
-            hint = "download in progress"
+            if isinstance(app, SophonTuiApp) and (
+                app.load_progress_total > 0 or app.load_progress_n > 0
+            ):
+                self._update_progress_panel(
+                    app.load_progress_n,
+                    app.load_progress_total,
+                    app.load_progress_phase or "downloading",
+                )
+                return
+            hint = format_download_bar_line(0, 0)
         elif "load" in kind:
             hint = "loading weights / switching model"
+        elif "finetun" in kind:
+            hint = "LoRA SFT · steps and loss stream in chat"
         else:
             hint = "in progress · server calls are not cancelled by Esc"
         bar_widget.update(hint)
+        curve_widget = self._query_widget("#train-curve", Static)
+        if curve_widget is not None:
+            losses = []
+            if isinstance(app, SophonTuiApp) and app.session_state is not None:
+                losses = list(getattr(app.session_state, "train_loss_history", []) or [])
+            if losses and "finetun" in kind:
+                from training.common.curves import sparkline
+
+                curve_widget.update(f"loss {sparkline(losses)} {losses[-1]:.4f}")
+                curve_widget.display = True
+                panel.styles.height = 3
+            else:
+                curve_widget.update("")
+                curve_widget.display = False
+                panel.styles.height = 2
         status = self._query_widget("#status-bar", Static)
         if status is not None:
-            status.update("")
+            self._update_status_bar("")
 
     def _update_progress_panel(self, n: int, total: int, phase: str) -> None:
         panel = self._query_widget("#progress-panel", Vertical)
@@ -479,54 +566,39 @@ class ChatScreen(ModeNavigationMixin, Screen):
         clean_phase = normalize_hub_phase(phase)
         if clean_phase.lower().startswith("downloading "):
             clean_phase = clean_phase.split(":", 1)[-1].strip()
-        if isinstance(app, OrodruinTuiApp):
+        if isinstance(app, SophonTuiApp):
             clean_phase = app.format_with_elapsed(clean_phase)
         phase_widget.update(clean_phase)
-        if is_file_count_progress(n, total, phase):
-            if total > 0:
-                bar = format_progress_bar(n, total)
-                bar_widget.update(f"[{bar}] {n} / {total} files")
-            else:
-                bar_widget.update("enumerating repo files on Hub...")
-        elif total > 0:
-            bar = format_progress_bar(n, total)
-            detail = format_byte_progress_pair(n, total)
-            bar_widget.update(f"[{bar}] {detail}")
-        elif n > 0:
-            bar_widget.update(format_byte_progress_pair(n, total))
-        elif "weight" in clean_phase.lower() or "tensor" in clean_phase.lower():
-            bar_widget.update(
-                "initializing quantized load — shard bar follows; "
-                "/mnt/c checkpoints are slow (copy to ~/ if this stalls)"
-            )
+        bps = float(getattr(app, "load_progress_bps", 0.0) or 0.0) if isinstance(app, SophonTuiApp) else 0.0
+        if is_file_count_progress(n, total, phase) or is_file_count_progress(n, total, clean_phase):
+            bar_widget.update(format_download_bar_line(n, total, file_count=True))
         else:
-            bar_widget.update(format_idle_download_hint())
+            bar_widget.update(format_download_bar_line(n, total, bytes_per_s=bps))
         status = self._query_widget("#status-bar", Static)
         if status is not None:
-            status.update("")
+            self._update_status_bar("")
 
     def _status_text(self) -> str:
-        from cli.chat_display import chat_ready_status_line
-
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
-        st = app.session_state
+        assert isinstance(app, SophonTuiApp)
+        if self.sst_recording():
+            rec = getattr(self.app.session_state, "sst_mic", None)
+            elapsed = float(getattr(rec, "elapsed_s", 0.0) or 0.0)
+            return f"Recording {elapsed:.0f}s · Stop or Ctrl+L to finish · Esc cancel"
         if self._busy:
             return self._activity_label()
-        if st is not None and not chat_session_ready(st):
-            if is_server_backend(st.backend_id):
-                return f"No {st.backend_id} model — /models or Ctrl+M, then Enter to load."
-            return "No weights loaded — /models or Ctrl+M, or /model-download PRESET."
-        if self._focus_target == "transcript":
-            return "Chat: select text · Copy button or Ctrl+Y · Esc input"
-        if st is not None:
-            return chat_ready_status_line(st)
-        return "Ready. /models or Ctrl+M · Ctrl+D/W/E/G panes · F1 = /commands."
+        state = app.session_state
+        if state is not None and bool(getattr(state, "ssl4sed_running", False)):
+            target = str(getattr(state, "trainer_target", "") or getattr(state, "ssl4sed_default_target", "") or "ssl4sed")
+            return f"ssl4sed running {target}  /trainer watch | /trainer stop"
+        if app.session_state is None:
+            return f"Loading model... {app.load_status}"
+        return ""
 
     def _set_busy(self, active: bool, status: str = "") -> None:
         self._busy = active
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         if active:
             app.start_action_timer(reset=True)
             self._spinner_i = 0
@@ -562,7 +634,13 @@ class ChatScreen(ModeNavigationMixin, Screen):
         prompt.focus()
         self._update_status_bar(self._status_text())
 
+    def sst_input_blocked(self) -> bool:
+        return self._busy or self._mic_transcribing
+
     def action_focus_prompt(self) -> None:
+        if self.sst_recording():
+            self._cancel_sst_mic()
+            return
         self._focus_prompt()
 
     def action_open_models(self) -> None:
@@ -580,29 +658,16 @@ class ChatScreen(ModeNavigationMixin, Screen):
         if self._busy or self.app.session_state is None:
             return
         self._focus_target = "transcript"
-        transcript = self._query_widget("#transcript", RichLog)
+        transcript = self._query_widget("#transcript", ChatTranscript)
         if transcript is not None:
             transcript.focus()
         self._update_status_bar(self._status_text())
-
-    def action_listen(self) -> None:
-        if self._busy or self.app.session_state is None:
-            return
-        self.run_worker(lambda: self._turn_worker("/listen"), thread=True, exclusive=True)
-
-    def action_copy_transcript(self) -> None:
-        payload = "\n".join(self._transcript_plain)
-        if not payload.strip():
-            self.notify("Nothing to copy.")
-            return
-        self.app.copy_to_clipboard(payload)
-        self.notify("Copied chat to clipboard.")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if self.handle_nav_button(event.button.id):
             return
         if event.button.id == "chat-copy":
-            self.action_copy_transcript()
+            self.action_copy_chat()
 
     def action_absorb_ctrl_c(self) -> None:
         self.notify("Ctrl+Y or the Copy button copies chat text. /quit or Ctrl+Q exits.", timeout=4)
@@ -616,16 +681,16 @@ class ChatScreen(ModeNavigationMixin, Screen):
             ("f1", "Show slash commands and key bindings"),
             ("ctrl+m", "Open model picker (/models)"),
             ("ctrl+d", "Open dashboard"),
-            ("ctrl+w", "Open workshop"),
-            ("ctrl+e", "Open editor (project tree · .py / .md / .svg / .stl / tables / .ipynb / .pdf)"),
+            ("ctrl+e", "Open editor (project tree · .py / .md / .svg / .stl / tables / .ipynb / .pdf / images)"),
+            ("ctrl+g", "Open nexus"),
             ("right", "Editor: accept autocomplete suggestion"),
             ("ctrl+b", "Editor: toggle project pane"),
             ("ctrl+j", "Editor: toggle lower panel"),
-            ("ctrl+h", "Cycle dashboard / workshop / editor / chat"),
+            ("ctrl+h", "Cycle dashboard / editor / chat"),
             ("ctrl+shift+t", "Focus chat log"),
-            ("ctrl+l", "Record from the microphone into the prompt (/listen)"),
+            ("ctrl+l", "Speak: click to start, click Stop to finish. Hold Speak to talk, release to stop"),
             ("ctrl+y", "Copy full chat log to clipboard"),
-            ("copy", "Toolbar Copy button — same as Ctrl+Y"),
+            ("copy", "Footer Copy button — same as Ctrl+Y"),
             ("ctrl+q", "Exit the TUI (/quit also works)"),
             ("tab", "Switch focus between chat log and input"),
             ("escape", "Return focus to the message input"),
@@ -636,22 +701,9 @@ class ChatScreen(ModeNavigationMixin, Screen):
             self._append_system(line)
         self._focus_prompt()
 
-    def _write_transcript(self, line: TranscriptLine) -> None:
-        self._transcript_plain.append(line.plain)
-        log = self._query_widget("#transcript", RichLog)
-        if log is not None:
-            if line.plain:
-                log.write(line.markup)
-            else:
-                log.write("")
-
-    def _append_system(self, text: str) -> None:
-        for chunk in text.splitlines() or [""]:
-            self._write_transcript(format_system_line(chunk, for_markup=True))
-
     def _append_user(self, text: str) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         if app.session_log is not None:
             app.session_log.write("user", text)
         self._turn_counter += 1
@@ -659,23 +711,14 @@ class ChatScreen(ModeNavigationMixin, Screen):
             format_user_turn_line(text, turn=self._turn_counter, for_markup=True)
         )
 
-    def _append_assistant(self, text: str) -> None:
-        self._write_transcript(
-            format_assistant_turn_header(turn=self._turn_counter, for_markup=True)
-        )
-        for chunk in text.splitlines() or [""]:
-            self._write_transcript(format_assistant_body_line(chunk, for_markup=True))
-
     def append_system_from_app(self, text: str) -> None:
-        if "conversation cleared" in text.lower():
-            self._turn_counter = 0
         for line in text.splitlines() or [""]:
             self._append_system(line)
 
-    def append_assistant_from_app(self, text: str) -> None:
-        self._append_assistant(text)
+    def append_assistant_from_app(self, text: str, trace: object | None = None) -> None:
+        self._append_assistant(text, trace)
 
-    def _model_picker_entries(self, app: "OrodruinTuiApp") -> list[ModelPickerEntry]:
+    def _model_picker_entries(self, app: "SophonTuiApp") -> list[ModelPickerEntry]:
         state = app.session_state
         if state is not None:
             return build_model_picker_entries(state)
@@ -701,7 +744,7 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def _open_model_picker(self) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         if self._picker_open:
             return
         self._picker_open = True
@@ -712,7 +755,13 @@ class ChatScreen(ModeNavigationMixin, Screen):
                 self._activate_model_entry(entry)
             self.call_after_refresh(self._focus_prompt)
 
-        self.app.push_screen(ModelPickerScreen(self._model_picker_entries(app)), on_close)
+        try:
+            entries = self._model_picker_entries(app)
+        except Exception as exc:
+            self._picker_open = False
+            self._append_system(f"(model picker failed: {exc})")
+            return
+        self.app.push_screen(ModelPickerScreen(entries), on_close)
 
     def _handle_models_command(self, line: str) -> bool:
         if not _MODELS_CMD.match(line.strip()):
@@ -807,7 +856,7 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def _transcribe_drop_worker(self, audio: list[Path], other: list[Path]) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         state = app.session_state
         if state is None:
             return
@@ -829,25 +878,42 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
+        if event.input.id != "prompt":
+            return
         if app.session_state is None or self._busy:
             return
         line = event.value
         event.input.value = ""
+        try:
+            self._submit_prompt_line(line)
+        except Exception as exc:
+            self._append_system(f"(send failed: {exc})")
+            self.call_after_refresh(self._focus_prompt)
+
+    def _submit_prompt_line(self, line: str) -> None:
+        app = self.app
+        assert isinstance(app, SophonTuiApp)
         if line.strip() == "":
+            if self.sst_recording():
+                self._stop_sst_mic()
             self.call_after_refresh(self._focus_prompt)
             return
         if self._handle_pending_download_answer(line):
             return
         if self._handle_models_command(line):
             return
+        if self.sst_recording() and not line.strip().lower().startswith("/listen"):
+            self._cancel_sst_mic()
 
         send_line = line
         dropped = list(self._dropped_paths)
-        if dropped and paths_still_in_text(line, dropped) and not line.strip().startswith("/"):
-            send_line = build_message_with_attachments(line, dropped)
+        state = app.session_state
+        if dropped and paths_still_in_text(line, dropped) and not line.strip().startswith("/") and line.strip() != "!":
+            if bool(getattr(state, "auto_attach", True)):
+                send_line = build_message_with_attachments(line, dropped)
             self._dropped_paths = []
-        elif dropped and not paths_still_in_text(line, dropped):
+        elif dropped:
             self._dropped_paths = []
 
         self._append_user(line if send_line == line else f"{line}  [+attached file(s)]")
@@ -855,9 +921,11 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def _download_model_worker(self, preset_key: str) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         app.call_from_thread(self._set_busy, True, f"Downloading {preset_key}...")
         progress_total = {"value": 0}
+        progress_n = {"value": 0}
+        rate_state = {"t": time.monotonic(), "n": 0, "bps": 0.0, "grew_at": time.monotonic()}
         try:
             os.environ["TQDM_POSITION"] = "-1"
             local_dir = resolve_preset_dir(preset_key, app.cwd)
@@ -866,22 +934,74 @@ class ChatScreen(ModeNavigationMixin, Screen):
                 app.post_message(HubLogLine(f"hub: {text}"))
 
             def emit_progress(n: int, total: int, phase: str) -> None:
-                if total > progress_total["value"]:
-                    progress_total["value"] = total
-                effective_total = total if total > 0 else progress_total["value"]
-                status = format_download_progress(n, effective_total, phase)
-                app.post_progress_status(status, n=n, total=effective_total, phase=phase)
+                if n > progress_n["value"]:
+                    progress_n["value"] = n
+                shown_n = progress_n["value"]
+                shown_total = total if total >= HUB_BYTE_TOTAL_MIN else progress_total["value"]
+                if shown_total > progress_total["value"]:
+                    progress_total["value"] = shown_total
+                shown_total = progress_total["value"]
+                now = time.monotonic()
+                dt = now - rate_state["t"]
+                dn = shown_n - rate_state["n"]
+                if dn > 0:
+                    rate_state["grew_at"] = now
+                    if dt >= 0.4:
+                        inst = dn / dt
+                        prev = rate_state["bps"]
+                        rate_state["bps"] = inst if prev <= 0 else (0.65 * prev + 0.35 * inst)
+                        rate_state["t"] = now
+                        rate_state["n"] = shown_n
+                elif now - rate_state["grew_at"] > 8.0:
+                    rate_state["bps"] = 0.0
+                bps = float(rate_state["bps"])
+                status = format_download_progress(
+                    shown_n, shown_total, phase, bytes_per_s=bps
+                )
+                app.post_progress_status(
+                    status,
+                    n=shown_n,
+                    total=shown_total,
+                    phase=phase,
+                    bytes_per_s=bps,
+                )
+
+            def on_expected_bytes(nbytes: int) -> None:
+                if nbytes > progress_total["value"]:
+                    progress_total["value"] = nbytes
+                emit_progress(
+                    scan_local_dir_download_bytes(local_dir),
+                    progress_total["value"],
+                    "Hub size known",
+                )
 
             def on_hub_progress(n: int, total: int, label: str) -> None:
                 phase, _detail = split_hub_progress_label(label)
-                emit_progress(n, total, phase)
+                if is_file_count_progress(n, total, phase) or is_file_count_progress(n, total, label):
+                    app.post_progress_status(label, n=n, total=total, phase=phase)
+                    return
+                if total >= HUB_BYTE_TOTAL_MIN and total > progress_total["value"]:
+                    progress_total["value"] = total
+                emit_progress(n, progress_total["value"], phase)
 
             def on_disk_bytes(nbytes: int) -> None:
                 emit_progress(nbytes, progress_total["value"], "on-disk download")
 
+            def on_hub_log(text: str) -> None:
+                hinted = parse_hub_size_hint(text)
+                if hinted > progress_total["value"]:
+                    progress_total["value"] = hinted
+                    emit_progress(progress_n["value"], hinted, "Hub size hint")
+                app.post_message(HubLogLine(text))
+
+            emit_progress(
+                scan_local_dir_download_bytes(local_dir),
+                0,
+                f"Downloading {preset_key}...",
+            )
             tqdm_class = hub_tqdm_bridge_factory(throttled_progress_callback(on_hub_progress))
             with watch_local_download_bytes(local_dir, on_disk_bytes):
-                with capture_hub_download_logs(lambda text: app.post_message(HubLogLine(text))):
+                with capture_hub_download_logs(on_hub_log):
                     with capture_hub_user_warnings(
                         lambda text: app.post_message(HubLogLine(f"(warning: {text})"))
                     ):
@@ -890,6 +1010,7 @@ class ChatScreen(ModeNavigationMixin, Screen):
                             tqdm_class=tqdm_class,
                             verbose=True,
                             on_status=on_hub_status,
+                            on_expected_bytes=on_expected_bytes,
                         )
             app.call_from_thread(self._append_system, f"(downloaded {preset_key} to {path})")
         except Exception as exc:
@@ -899,7 +1020,7 @@ class ChatScreen(ModeNavigationMixin, Screen):
 
     def _switch_model_worker(self, target: str) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         state = app.session_state
         if state is None:
             return
@@ -908,43 +1029,83 @@ class ChatScreen(ModeNavigationMixin, Screen):
             switch_session_model(state, target, on_load_progress=app.progress_from_thread)
         finally:
             app.call_from_thread(self._set_busy, False)
-            app.call_from_thread(self._render_chat_banner)
             app.call_from_thread(self.post_message, TurnComplete())
+
+    def _turn_busy_label(self, raw: str) -> str:
+        if raw.startswith("/listen"):
+            return "Transcribing…"
+        if raw.startswith("/finetune"):
+            return "Finetuning..."
+        if raw.startswith("/trainer run"):
+            state = self.app.session_state
+            driver = str(getattr(state, "trainer_driver", "") or "") if state is not None else ""
+            if driver == "ssl4sed" or "target=" in raw:
+                return "Starting ssl4sed..."
+            return "Finetuning..."
+        if raw.startswith("/trainer data get"):
+            return "Trainer data..."
+        if raw.startswith("/trainer"):
+            return "Trainer..."
+        if raw.startswith("/models-sync") or raw.startswith("/models-refresh"):
+            return "Syncing model index..."
+        if raw.startswith("/eval") or raw.startswith("/rag-index"):
+            return "Evaluating..."
+        return "Thinking…"
 
     def _turn_worker(self, line: str) -> None:
         app = self.app
-        assert isinstance(app, OrodruinTuiApp)
+        assert isinstance(app, SophonTuiApp)
         state = app.session_state
         if state is None:
             return
-        app.call_from_thread(
-            self._set_busy,
-            True,
-            "Listening…"
-            if line.strip().lower().startswith("/listen")
-            else "Finetuning..."
-            if line.strip().lower().startswith("/finetune")
-            else "Thinking…",
-        )
+        raw = line.strip().lower()
+        listen_start = raw.startswith("/listen") and not sst_recording(state) and "cancel" not in raw
+        if not listen_start:
+            app.call_from_thread(
+                self._set_busy,
+                True,
+                self._turn_busy_label(raw),
+            )
         try:
             handled, should_generate = dispatch_chat_line(state, line)
             if state.exit_requested:
                 app.call_from_thread(app.exit)
                 return
             if handled and not should_generate:
-                app.call_from_thread(self._render_chat_banner)
+                app.call_from_thread(self.refresh_from_state)
                 return
             if not handled:
-                state.messages.append({"role": "user", "content": line.rstrip()})
+                from cli.chat import prepare_user_message_text
+
+                state.messages.append(
+                    {"role": "user", "content": prepare_user_message_text(state, line)}
+                )
             app.call_from_thread(self._set_busy, True, "Generating…")
             run_chat_generation(state)
+        except Exception as exc:
+            import traceback
+
+            tb = traceback.format_exc()
+            if app.session_log is not None:
+                app.session_log.write("err", tb)
+            app.call_from_thread(self._append_system, f"(turn failed: {exc})")
         finally:
             app.call_from_thread(self._set_busy, False)
-            app.call_from_thread(self._render_chat_banner)
             app.call_from_thread(self.post_message, TurnComplete())
 
     def _activate_model_entry(self, entry: ModelPickerEntry) -> None:
         if self._busy or self.app.session_state is None or entry.kind in ModelListItem._NON_SELECTABLE:
+            return
+        if entry.kind == "adapter":
+            if entry.current:
+                self._append_system(f"(already using adapter {entry.title})")
+                return
+            self._append_user(f"/adapter load {entry.target}")
+            self.run_worker(
+                lambda: self._adapter_load_worker(entry.target),
+                thread=True,
+                exclusive=True,
+            )
             return
         if not entry.local:
             self._prompt_download(entry)
@@ -955,21 +1116,28 @@ class ChatScreen(ModeNavigationMixin, Screen):
         self._append_user(f"/model {entry.target}")
         self.run_worker(lambda: self._switch_model_worker(entry.target), thread=True, exclusive=True)
 
+    def _adapter_load_worker(self, name: str) -> None:
+        app = self.app
+        assert isinstance(app, SophonTuiApp)
+        state = app.session_state
+        if state is None:
+            return
+        app.call_from_thread(self._set_busy, True, f"Loading adapter {name}...")
+        try:
+            dispatch_chat_line(state, f"/adapter load {name}")
+        finally:
+            app.call_from_thread(self._set_busy, False)
+            app.call_from_thread(self.post_message, TurnComplete())
+
     def on_turn_complete(self, _event: TurnComplete) -> None:
-        self._render_chat_banner()
         self._focus_prompt()
 
-    def on_resize(self, _event: events.Resize) -> None:
-        if self.app.session_state is not None:
-            self._render_chat_banner()
 
-
-class OrodruinTuiApp(App):
+class SophonTuiApp(App):
     ENABLE_COMMAND_PALETTE = True
     TITLE = DASHBOARD_TITLE
     MODES = {
         "dashboard": DashboardScreen,
-        "workshop": WorkshopScreen,
         "editor": EditorScreen,
         "chat": ChatScreen,
     }
@@ -983,6 +1151,12 @@ class OrodruinTuiApp(App):
 
         Screen {
             layout: vertical;
+            padding: 0;
+        }
+
+        ChatScreen {
+            padding: 0;
+            layout: vertical;
         }
 
         #nav-bar {
@@ -994,7 +1168,7 @@ class OrodruinTuiApp(App):
             border-bottom: solid $secondary;
         }
 
-        #nav-dashboard, #nav-workshop, #nav-editor, #nav-chat {
+        #nav-dashboard, #nav-editor, #nav-chat {
             min-width: 12;
             height: 1;
             min-height: 1;
@@ -1022,6 +1196,30 @@ class OrodruinTuiApp(App):
             column-span: 2;
         }
 
+        DashboardScreen.-dash-scroll #dash-root,
+        DashboardScreen.-dash-narrow #dash-root {
+            overflow-y: auto;
+        }
+
+        DashboardScreen.-dash-scroll #dash-grid,
+        DashboardScreen.-dash-narrow #dash-grid {
+            height: auto;
+        }
+
+        DashboardScreen.-dash-scroll #dash-grid > *,
+        DashboardScreen.-dash-narrow #dash-grid > * {
+            height: auto;
+            min-height: 4;
+        }
+
+        DashboardScreen.-dash-narrow #dash-grid {
+            grid-size: 1;
+        }
+
+        DashboardScreen.-dash-narrow .tile-span-2 {
+            column-span: 1;
+        }
+
         #dash-notes {
             height: 1;
             color: $text-muted;
@@ -1035,6 +1233,12 @@ class OrodruinTuiApp(App):
         #chat-column {
             height: 1fr;
             width: 1fr;
+            border: solid $primary;
+            background: $background;
+        }
+
+        #chat-column:focus-within {
+            border: solid $accent;
         }
 
         #home-left {
@@ -1099,47 +1303,117 @@ class OrodruinTuiApp(App):
             scrollbar-gutter: stable;
         }
 
-        #chat-banner {
+        #chat-toolbar-title {
+            width: 100%;
             height: auto;
-            min-height: 9;
-            max-height: 14;
+            min-height: 8;
             padding: 0 1;
-            background: $surface;
-            border: solid $primary;
+            background: $background;
             color: $text;
         }
 
-        #chat-toolbar {
-            height: 1;
-            layout: horizontal;
+        .chat-log-wrap {
+            height: 1fr;
+            layout: vertical;
+            background: $background;
+        }
+
+        .slash-palette {
+            width: 100%;
+            height: auto;
+            max-height: 12;
+            display: none;
+            border-top: solid $secondary;
             background: $surface;
-            border: solid $primary;
-            border-top: none;
-            border-bottom: none;
+            padding: 0;
         }
 
-        #chat-toolbar-title {
-            width: 1fr;
-            padding: 0 1;
-            color: $text-muted;
+        #chat-column > .chat-log-wrap {
+            border: none;
         }
 
-        #chat-copy {
-            min-width: 8;
-            height: 1;
+        #chat-column > .chat-log-wrap:focus-within {
             border: none;
         }
 
         #transcript {
             height: 1fr;
-            border: solid $primary;
+            border: none;
             scrollbar-gutter: stable;
             padding: 0 1;
             background: $background;
         }
 
         #transcript:focus-within {
-            border: solid $accent;
+            border: none;
+        }
+
+        ChatTranscript {
+            background: $background;
+        }
+
+        .transcript-line {
+            width: 100%;
+            height: auto;
+            padding: 0;
+        }
+
+        .turn-heartbeat, .heartbeat-kind, .heartbeat-stack {
+            width: 100%;
+            height: auto;
+            min-height: 1;
+            padding: 0;
+            background: $background;
+        }
+
+        .heartbeat-title, .heartbeat-kind-title {
+            width: 100%;
+            height: 1;
+            min-height: 1;
+            padding: 0 1;
+            color: $text-muted;
+        }
+
+        .heartbeat-reasoning {
+            width: 100%;
+            height: auto;
+            padding: 0 1 1 1;
+            color: $text-muted;
+        }
+
+        .heartbeat-meta {
+            width: 100%;
+            height: auto;
+            padding: 0 1;
+            color: $text-muted;
+        }
+
+        .heartbeat-body {
+            width: 100%;
+            height: auto;
+            padding: 0 1;
+            color: $text-muted;
+        }
+
+        .speech-clip-bar {
+            height: 1;
+            width: 100%;
+            layout: horizontal;
+            background: $surface;
+        }
+
+        .speech-clip-label {
+            width: 1fr;
+            height: 1;
+            padding: 0 1;
+            color: $text-muted;
+        }
+
+        .speech-clip-btn {
+            min-width: 6;
+            height: 1;
+            border: none;
+            padding: 0 1;
         }
 
         RichLog {
@@ -1203,7 +1477,7 @@ class OrodruinTuiApp(App):
             border: none;
         }
 
-        #editor-aux-tab-terminal, #editor-aux-tab-chat, #editor-aux-tab-logs, #editor-aux-tab-errors {
+        #editor-aux-tab-terminal, #editor-aux-tab-chat, #editor-aux-tab-review, #editor-aux-tab-logs, #editor-aux-tab-errors {
             min-width: 10;
             height: 1;
             border: none;
@@ -1214,7 +1488,11 @@ class OrodruinTuiApp(App):
             width: 1fr;
         }
 
-        #editor-tree {
+        #editor-tree-switch {
+            height: 1fr;
+        }
+
+        #editor-tree, #editor-zotero-tree, #editor-drive-tree, #editor-bookmarks-tree, #editor-overleaf-tree {
             height: 1fr;
             border-top: solid $primary;
             overflow-x: auto;
@@ -1273,7 +1551,7 @@ class OrodruinTuiApp(App):
         }
 
         #editor-aux {
-            height: 10;
+            height: 14;
             min-height: 3;
             border: solid $secondary;
             background: $surface;
@@ -1321,24 +1599,79 @@ class OrodruinTuiApp(App):
             padding: 0;
         }
 
+        #editor-aux-chat-status-row {
+            height: 1;
+            layout: horizontal;
+            background: $surface;
+        }
+
         #editor-aux-chat-status {
+            width: 1fr;
             height: 1;
             padding: 0 1;
             color: $text-muted;
         }
 
+        #editor-aux-chat-copy, #editor-aux-speak {
+            min-width: 8;
+            height: 1;
+            border: none;
+        }
+
         #editor-aux-chat-log {
+            height: 1fr;
+            border: none;
+            background: $background;
+            scrollbar-gutter: stable;
+            padding: 0 1;
+        }
+
+        #editor-aux-chat > .chat-log-wrap {
             height: 1fr;
             border: none;
         }
 
-        #editor-aux-chat-prompt {
-            height: 3;
-            border: tall $primary;
+        #editor-aux-review {
+            height: 1fr;
+            layout: vertical;
+            padding: 0;
         }
 
-        #editor-aux-chat-prompt:focus-within {
-            border: tall $accent;
+        #editor-aux-review-status {
+            height: 1;
+            padding: 0 1;
+            color: $text-muted;
+        }
+
+        #editor-aux-review-actions {
+            height: 1;
+            layout: horizontal;
+            margin-bottom: 1;
+        }
+
+        #editor-aux-review-actions Button {
+            min-width: 12;
+            height: 1;
+            border: none;
+            margin-right: 1;
+        }
+
+        #editor-aux-review-body {
+            height: 1fr;
+            layout: horizontal;
+        }
+
+        #editor-aux-review-files {
+            width: 36;
+            height: 1fr;
+            border: solid $secondary;
+        }
+
+        #editor-aux-review-diff {
+            width: 1fr;
+            height: 1fr;
+            border: solid $secondary;
+            margin-left: 1;
         }
 
         #editor-aux-logs, #editor-aux-errors {
@@ -1366,6 +1699,76 @@ class OrodruinTuiApp(App):
         }
 
         #editor-unsaved-actions Button {
+            margin: 0 1;
+        }
+
+        PermissionPrompt {
+            align: center middle;
+            background: $background 60%;
+        }
+
+        #permission-dialog {
+            width: 72;
+            max-width: 90%;
+            height: auto;
+            max-height: 90%;
+            border: thick $primary;
+            background: $surface;
+            padding: 1 2;
+        }
+
+        #permission-title {
+            text-style: bold;
+            margin-bottom: 1;
+        }
+
+        #permission-body {
+            height: auto;
+        }
+
+        #permission-actions {
+            height: auto;
+            margin-top: 1;
+            align: center middle;
+        }
+
+        #permission-actions Button {
+            margin: 0 1;
+        }
+
+        SetupPrompt {
+            align: center middle;
+            background: $background 60%;
+        }
+
+        #setup-dialog {
+            width: 72;
+            max-width: 90%;
+            height: auto;
+            max-height: 90%;
+            border: thick $primary;
+            background: $surface;
+            padding: 1 2;
+        }
+
+        #setup-title {
+            text-style: bold;
+            margin-bottom: 1;
+        }
+
+        #setup-body {
+            height: auto;
+            max-height: 24;
+            overflow-y: auto;
+        }
+
+        #setup-actions {
+            height: auto;
+            margin-top: 1;
+            align: center middle;
+        }
+
+        #setup-actions Button {
             margin: 0 1;
         }
 
@@ -1467,13 +1870,51 @@ class OrodruinTuiApp(App):
             padding: 1 2;
         }
 
-        #home-prompt, #prompt {
+        .transcript-prompt-row {
+            width: 100%;
+            height: 1;
+            min-height: 1;
+            layout: horizontal;
+            background: $background;
+            padding: 0 1;
+        }
+
+        .transcript-prompt-mark {
+            width: 2;
+            height: 1;
+            color: $text-muted;
+        }
+
+        #home-prompt {
             dock: bottom;
+            width: 1fr;
             border: tall $primary;
         }
 
-        #home-prompt:focus-within, #prompt:focus-within {
-            border: tall $accent;
+        #prompt, #editor-aux-chat-prompt {
+            width: 1fr;
+            height: 1;
+            min-height: 1;
+            border: none;
+            background: $background;
+            padding: 0;
+            color: $text;
+        }
+
+        #prompt:focus, #prompt:focus-within,
+        #editor-aux-chat-prompt:focus, #editor-aux-chat-prompt:focus-within {
+            border: none;
+            background: $background;
+        }
+
+        #chat-speak, #editor-aux-speak {
+            min-width: 8;
+            height: 1;
+            min-height: 1;
+            max-height: 1;
+            border: none;
+            margin: 0;
+            padding: 0 1;
         }
 
         ModelPickerScreen {
@@ -1509,7 +1950,7 @@ class OrodruinTuiApp(App):
             border-top: none;
         }
 
-        #download-phase, #download-bar, #model-picker-hint, #status-bar {
+        #download-phase, #download-bar, #train-curve, #model-picker-hint, #status-bar {
             height: 1;
             padding: 0 1;
             color: $text-muted;
@@ -1520,7 +1961,9 @@ class OrodruinTuiApp(App):
         }
 
         #status-bar {
+            dock: bottom;
             background: $surface;
+            display: none;
         }
     """
 
@@ -1534,12 +1977,14 @@ class OrodruinTuiApp(App):
         self.load_progress_n = 0
         self.load_progress_total = 0
         self.load_progress_phase = ""
+        self.load_progress_bps = 0.0
         self.model_status_text = "loading..."
         self._action_started_at: float | None = None
-        self.cwd = orodruin_project_root()
+        self.cwd = sophon_project_root()
         self._stderr_prev = sys.__stderr__
         self._pending_system_lines: list[str] = []
-        self._pending_assistant_lines: list[str] = []
+        self._pending_assistant_lines: list = []
+        self._pending_speech_clips: list = []
         self._throttled_emit_progress = throttled_progress_callback(self._emit_throttled_progress)
 
     async def on_mount(self) -> None:
@@ -1562,21 +2007,120 @@ class OrodruinTuiApp(App):
         if self.session_log is not None:
             self.session_log.close()
 
+    def _call_on_app_thread(self, callback, *args) -> None:
+        if getattr(self, "_thread_id", None) == threading.get_ident():
+            callback(*args)
+            return
+        self.call_from_thread(callback, *args)
+
+    def _handle_exception(self, error: Exception) -> None:
+        if self.session_log is not None:
+            import traceback
+
+            self.session_log.write("err", traceback.format_exc())
+        super()._handle_exception(error)
+
     def _wrap_chat_io(self) -> ChatIo:
         def emit(text: str) -> None:
             if self.session_log is not None:
                 self.session_log.write("sys", text)
-            self.call_from_thread(self.append_system, text)
+            self._call_on_app_thread(self.append_system, text)
 
-        def on_assistant(text: str) -> None:
+        def on_assistant(text: str, trace: object | None = None) -> None:
             if self.session_log is not None:
                 self.session_log.write("assistant", text)
-            self.call_from_thread(self.append_assistant, text)
+                if trace is not None:
+                    from cli.chat_trace import TurnTrace
+
+                    if isinstance(trace, TurnTrace):
+                        for line in format_turn_trace_lines(trace, for_markup=False, reply_text=text):
+                            self.session_log.write("trace", line.plain)
+            self._call_on_app_thread(self.append_assistant, text, trace)
 
         def on_dictate(text: str) -> None:
-            self.call_from_thread(self._dictate_into_prompt, text)
+            self._call_on_app_thread(self._dictate_into_prompt, text)
 
-        return ChatIo(emit=emit, on_assistant=on_assistant, on_dictate=on_dictate)
+        def on_speech_clip(clip) -> None:
+            self._call_on_app_thread(self.append_speech_clip, clip)
+
+        def on_mic(phase: str) -> None:
+            self._call_on_app_thread(self._apply_mic_phase, phase)
+
+        def on_clear() -> None:
+            self._call_on_app_thread(self.clear_visible_chat)
+
+        def on_step(step) -> None:
+            if self.session_log is not None:
+                from cli.chat_trace import format_heartbeat_step_plain
+
+                self.session_log.write("step", format_heartbeat_step_plain(step))
+            self._call_on_app_thread(self.append_heartbeat_step, step)
+
+        def on_heartbeat_end() -> None:
+            self._call_on_app_thread(self.finish_heartbeat)
+
+        def on_permission(request) -> str:
+            from harness.approval import DECISION_DENY, PermissionRequest
+
+            if not isinstance(request, PermissionRequest):
+                return DECISION_DENY
+            future: Future[str] = Future()
+
+            def _show() -> None:
+                def _done(choice: str | None) -> None:
+                    if not future.done():
+                        future.set_result(choice or DECISION_DENY)
+
+                self.push_screen(PermissionPrompt(request), _done)
+
+            self._call_on_app_thread(_show)
+            try:
+                return future.result()
+            except Exception:
+                return DECISION_DENY
+
+        def on_setup_choice(summary: str) -> str:
+            future: Future[str] = Future()
+
+            def _show() -> None:
+                def _done(choice: str | None) -> None:
+                    if not future.done():
+                        future.set_result(choice or SETUP_SKIP)
+
+                self.push_screen(SetupPrompt(summary), _done)
+
+            self._call_on_app_thread(_show)
+            try:
+                return future.result()
+            except Exception:
+                return SETUP_SKIP
+
+        return ChatIo(
+            emit=emit,
+            on_assistant=on_assistant,
+            on_dictate=on_dictate,
+            on_speech_clip=on_speech_clip,
+            on_mic=on_mic,
+            on_clear=on_clear,
+            on_step=on_step,
+            on_heartbeat_end=on_heartbeat_end,
+            on_permission=on_permission,
+            on_setup_choice=on_setup_choice,
+        )
+
+    def _apply_mic_phase(self, phase: str) -> None:
+        if phase == "stopped":
+            return
+        screen = self.screen
+        handler = getattr(screen, "on_sst_mic_phase", None)
+        if callable(handler):
+            handler(phase)
+            return
+        if phase == "max" and self.session_state is not None:
+            from cli.chat import finish_sst_recording
+
+            state = self.session_state
+            self.run_worker(lambda: finish_sst_recording(state), thread=True, group="sst-mic")
 
     def _dictate_into_prompt(self, text: str) -> None:
         screen = self.screen
@@ -1609,11 +2153,18 @@ class OrodruinTuiApp(App):
     def format_with_elapsed(self, text: str) -> str:
         if self._action_started_at is None or not text.strip():
             return text
+        lines = text.split("\n", 1)
+        if _ELAPSED_SUFFIX_RE.search(lines[0].rstrip()):
+            return text
         elapsed = time.monotonic() - self._action_started_at
         suffix = f" · {_format_action_elapsed(elapsed)}"
-        lines = text.split("\n", 1)
         lines[0] = lines[0].rstrip() + suffix
         return "\n".join(lines)
+
+    def copy_to_clipboard(self, text: str) -> None:
+        if copy_text_to_system_clipboard(text):
+            return
+        super().copy_to_clipboard(text)
 
     def _preload_worker(self) -> None:
         self.call_from_thread(lambda: self.start_action_timer(reset=True))
@@ -1637,8 +2188,11 @@ class OrodruinTuiApp(App):
         n: int = 0,
         total: int = 0,
         phase: str = "",
+        bytes_per_s: float = 0.0,
     ) -> None:
-        self.post_message(LoadProgress(status, n=n, total=total, phase=phase))
+        self.post_message(
+            LoadProgress(status, n=n, total=total, phase=phase, bytes_per_s=bytes_per_s)
+        )
 
     def on_load_progress(self, event: LoadProgress) -> None:
         self.set_load_status(
@@ -1646,6 +2200,7 @@ class OrodruinTuiApp(App):
             n=event.n,
             total=event.total,
             phase=event.phase,
+            bytes_per_s=event.bytes_per_s,
         )
 
     def on_hub_log_line(self, event: HubLogLine) -> None:
@@ -1668,6 +2223,7 @@ class OrodruinTuiApp(App):
         n: int = 0,
         total: int = 0,
         phase: str = "",
+        bytes_per_s: float = 0.0,
     ) -> None:
         if self.session_state is None or self._action_started_at is not None:
             self.start_action_timer()
@@ -1675,10 +2231,11 @@ class OrodruinTuiApp(App):
         self.load_progress_n = n
         self.load_progress_total = total
         self.load_progress_phase = phase or status
+        self.load_progress_bps = bytes_per_s
         self.model_status_text = self.format_with_elapsed(status)
         screen = self.screen
         try:
-            if isinstance(screen, (DashboardScreen, WorkshopScreen)):
+            if isinstance(screen, DashboardScreen):
                 screen.refresh_stats()
             elif isinstance(screen, ChatScreen):
                 screen.update_load_status()
@@ -1694,6 +2251,7 @@ class OrodruinTuiApp(App):
         self.load_progress_n = 0
         self.load_progress_total = 0
         self.load_progress_phase = ""
+        self.load_progress_bps = 0.0
         if chat_session_ready(state):
             if is_server_backend(state.backend_id):
                 label = f"{state.backend_id}:{state.server_model}"
@@ -1705,8 +2263,25 @@ class OrodruinTuiApp(App):
         else:
             self.load_status = "no weights at resolved path (use /models)"
         self.model_status_text = self.load_status
+        from cli.code_assist import ensure_assist
+
+        ensure_assist(state)
+        state.assist_ui_hook = self._assist_ui_hook
         self.post_message(SessionReady())
         self.refresh_active_screen()
+
+    def _assist_ui_hook(self) -> None:
+        try:
+            self.call_from_thread(self._refresh_assist_ui)
+        except RuntimeError:
+            self._refresh_assist_ui()
+
+    def _refresh_assist_ui(self) -> None:
+        screen = self.screen
+        if isinstance(screen, EditorScreen):
+            screen.refresh_review_pane(focus_tab=True)
+            return
+        self.notify("Pending code edits. Open Editor and the Review tab.")
 
     def _set_session_failed(self, error: str) -> None:
         self.stop_action_timer()
@@ -1720,17 +2295,13 @@ class OrodruinTuiApp(App):
 
     def refresh_active_screen(self) -> None:
         screen = self.screen
-        if isinstance(screen, (DashboardScreen, WorkshopScreen)):
+        if isinstance(screen, DashboardScreen):
             screen.refresh_stats()
         elif isinstance(screen, ChatScreen):
             screen.refresh_from_state()
         elif isinstance(screen, EditorScreen):
             screen.refresh_chat_pane()
-
-    async def open_workshop(self) -> None:
-        self._apply_window_title(WORKSHOP_TITLE)
-        await self.switch_mode("workshop")
-        self.call_after_refresh(self.refresh_active_screen)
+            screen.refresh_review_pane()
 
     async def open_editor(self) -> None:
         self._apply_window_title(EDITOR_TITLE)
@@ -1754,12 +2325,29 @@ class OrodruinTuiApp(App):
         nxt = MODE_CYCLE[(MODE_CYCLE.index(current) + 1) % len(MODE_CYCLE)]
         if nxt == "dashboard":
             await self.open_dashboard()
-        elif nxt == "workshop":
-            await self.open_workshop()
         elif nxt == "editor":
             await self.open_editor()
         else:
             await self.open_chat()
+
+    def clear_visible_chat(self) -> None:
+        screen = self.screen
+        if isinstance(screen, ChatScreen):
+            screen.clear_transcript()
+        elif isinstance(screen, EditorScreen):
+            screen.clear_chat_log()
+        self._pending_system_lines.clear()
+        self._pending_assistant_lines.clear()
+
+    def append_heartbeat_step(self, step) -> None:
+        handler = getattr(self.screen, "append_heartbeat_step", None)
+        if callable(handler):
+            handler(step)
+
+    def finish_heartbeat(self) -> None:
+        handler = getattr(self.screen, "finish_heartbeat", None)
+        if callable(handler):
+            handler()
 
     def append_system(self, text: str) -> None:
         screen = self.screen
@@ -1770,14 +2358,37 @@ class OrodruinTuiApp(App):
         else:
             self._pending_system_lines.append(text)
 
-    def append_assistant(self, text: str) -> None:
+    def append_assistant(self, text: str, trace: object | None = None) -> None:
         screen = self.screen
         if isinstance(screen, ChatScreen):
-            screen.append_assistant_from_app(text)
+            screen.append_assistant_from_app(text, trace)
         elif isinstance(screen, EditorScreen):
-            screen.append_chat_assistant(text)
+            screen.append_chat_assistant(text, trace)
         else:
-            self._pending_assistant_lines.append(text)
+            self._pending_assistant_lines.append((text, trace))
+
+    def append_speech_clip(self, clip) -> None:
+        if self.session_log is not None:
+            self.session_log.write("speech", format_speech_clip_line(clip).plain)
+        screen = self.screen
+        if isinstance(screen, ChatScreen):
+            screen.append_speech_clip(clip)
+        elif isinstance(screen, EditorScreen):
+            screen.append_speech_clip(clip)
+        else:
+            self._pending_speech_clips.append(clip)
+
+    def play_session_clip(self, clip_id: int, speed: float = 1.0) -> None:
+        state = self.session_state
+        if state is None:
+            self.notify("No chat session.")
+            return
+        self.run_worker(
+            lambda: play_speech_clip(state, str(int(clip_id)), speed=float(speed)),
+            thread=True,
+            exclusive=False,
+            group="speech-play",
+        )
 
     def run_shell_command(self, command: str) -> None:
         from integrations.shell.runner import ShellSession
@@ -1806,11 +2417,16 @@ class OrodruinTuiApp(App):
 
     def _append_home_log(self, text: str) -> None:
         screen = self.screen
-        if isinstance(screen, WorkshopScreen):
-            screen.append_log(text)
-        elif isinstance(screen, EditorScreen):
+        if isinstance(screen, EditorScreen):
             screen.append_terminal_log(text)
+        elif isinstance(screen, ChatScreen):
+            screen.append_system_from_app(text)
+        else:
+            self._pending_system_lines.append(text)
 
 
 def run_tui_app(params: ChatCliParams, session_log: TuiSessionLog | None) -> None:
-    OrodruinTuiApp(params, session_log).run()
+    from cli.tui.terminal_image import probe_terminal_graphics
+
+    probe_terminal_graphics()
+    SophonTuiApp(params, session_log).run()

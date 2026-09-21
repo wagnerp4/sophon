@@ -8,14 +8,21 @@ from typing import TextIO
 
 def _project_log_dir() -> Path:
     """TODO:replace and move to src/utils/logging.py"""
-    from utils.device.env_bootstrap import orodruin_chat_logs_dir
+    from utils.device.env_bootstrap import sophon_chat_logs_dir
 
-    return orodruin_chat_logs_dir()
+    return sophon_chat_logs_dir()
 
 
 def make_session_log_path() -> Path:
     """TODO:replace and move to src/utils/logging.py"""
     return _project_log_dir() / "tui.log"
+
+
+def resolve_session_log_path() -> Path:
+    raw = os.environ.get("SOPHON_TUI_LOG", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return make_session_log_path().resolve()
 
 
 class TuiSessionLog:
@@ -69,7 +76,7 @@ class TeeTextIO:
 
 
 def open_session_log_from_env() -> TuiSessionLog | None:
-    raw = os.environ.get("ORODRUIN_TUI_LOG", "").strip()
+    raw = os.environ.get("SOPHON_TUI_LOG", "").strip()
     if not raw:
         return None
     return TuiSessionLog(Path(raw))

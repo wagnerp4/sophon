@@ -15,7 +15,7 @@ _CORE_CRYPTO = ("BTC", "ETH", "SOL")
 
 
 def _crypto_symbols() -> list[str]:
-    raw = os.environ.get("ORODRUIN_CRYPTO_SYMBOLS", "BTC,ETH,SOL").strip()
+    raw = os.environ.get("SOPHON_CRYPTO_SYMBOLS", "BTC,ETH,SOL").strip()
     parts = [part.strip().upper() for part in raw.split(",") if part.strip()]
     return parts or list(_CORE_CRYPTO)
 

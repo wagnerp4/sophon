@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 _WEIGHT_SHARD_RE = re.compile(r"^(model|pytorch_model)-(\d+)-of-(\d+)\.(safetensors|bin)$")
@@ -14,6 +14,10 @@ class HFModelPreset:
     repo_id: str
     default_local_dir: str
     description: str
+    finetune_eligible: bool = False
+    finetune_requires_allow_large: bool = False
+    finetune_reason: str = ""
+    vram_class: str = ""
 
 
 PresetRow = tuple[str, str, str] | tuple[str, str, str, str]
@@ -126,16 +130,109 @@ _QWEN_PRESET_ROWS: tuple[PresetRow, ...] = (
 )
 
 
-HF_MODEL_PRESETS: dict[str, HFModelPreset] = {
-    **_preset_dict(_GOOGLE_PRESET_ROWS),
-    **_preset_dict(_META_PRESET_ROWS),
-    **_preset_dict(_VICUNA_PRESET_ROWS),
-    **_preset_dict(_QWEN_PRESET_ROWS),
+_FINETUNE_STANDARD_VRAM: dict[str, str] = {
+    "llama2_7b_chat": "7b",
+    "llama2_13b_chat": "13b",
+    "llama3_8b_instruct": "8b",
+    "llama3_1_8b_instruct": "8b",
+    "vicuna_7b_v1_5": "7b",
+    "vicuna_13b_v1_5": "13b",
 }
+
+_FINETUNE_LARGE_VRAM: dict[str, str] = {
+    "llama3_70b_instruct": "70b",
+}
+
+
+def _infer_finetune_ineligible_reason(key: str, preset: HFModelPreset) -> str:
+    blob = f"{key} {preset.repo_id} {preset.description}".lower()
+    if key.startswith("gemma4") or "gemma-4" in blob:
+        return "Gemma 4 uses multimodal / image-text loaders, not causal LoRA SFT"
+    if key.startswith("llama4") or "llama-4" in blob:
+        return "Llama 4 is MoE vision, not causal LoRA SFT in this trainer"
+    if "gptq" in blob:
+        return "GPTQ checkpoints are already quantized; this trainer does not stack 4-bit LoRA on GPTQ"
+    if "fp8" in blob:
+        return "FP8 checkpoints are already quantized; this trainer does not stack 4-bit LoRA on FP8"
+    if "tts" in blob:
+        return "TTS weights are not a causal LoRA SFT target"
+    if "asr" in blob or "forcedaligner" in blob or "tokenizer-12hz" in blob:
+        return "ASR / audio weights are not a causal LoRA SFT target"
+    if key.startswith("qwen"):
+        return "Qwen rows in this registry are image-text, TTS, ASR, GPTQ, or FP8, not causal LoRA SFT"
+    return "not a causal LoRA SFT target in this trainer"
+
+
+def _with_finetune_flags(presets: dict[str, HFModelPreset]) -> dict[str, HFModelPreset]:
+    out: dict[str, HFModelPreset] = {}
+    for key, preset in presets.items():
+        if key in _FINETUNE_STANDARD_VRAM:
+            out[key] = replace(
+                preset,
+                finetune_eligible=True,
+                finetune_requires_allow_large=False,
+                finetune_reason="",
+                vram_class=_FINETUNE_STANDARD_VRAM[key],
+            )
+            continue
+        if key in _FINETUNE_LARGE_VRAM:
+            out[key] = replace(
+                preset,
+                finetune_eligible=True,
+                finetune_requires_allow_large=True,
+                finetune_reason="requires allow_large=true (70B-class VRAM)",
+                vram_class=_FINETUNE_LARGE_VRAM[key],
+            )
+            continue
+        out[key] = replace(
+            preset,
+            finetune_eligible=False,
+            finetune_requires_allow_large=False,
+            finetune_reason=_infer_finetune_ineligible_reason(key, preset),
+            vram_class="",
+        )
+    return out
+
+
+HF_MODEL_PRESETS: dict[str, HFModelPreset] = _with_finetune_flags(
+    {
+        **_preset_dict(_GOOGLE_PRESET_ROWS),
+        **_preset_dict(_META_PRESET_ROWS),
+        **_preset_dict(_VICUNA_PRESET_ROWS),
+        **_preset_dict(_QWEN_PRESET_ROWS),
+    }
+)
 
 
 def preset_keys_sorted() -> list[str]:
     return sorted(HF_MODEL_PRESETS.keys())
+
+
+def finetune_eligible_keys(*, include_large: bool = True) -> list[str]:
+    keys: list[str] = []
+    for key in preset_keys_sorted():
+        preset = HF_MODEL_PRESETS[key]
+        if not preset.finetune_eligible:
+            continue
+        if preset.finetune_requires_allow_large and not include_large:
+            continue
+        keys.append(key)
+    return keys
+
+
+def require_finetune_preset(preset_key: str, *, allow_large: bool = False) -> HFModelPreset:
+    if preset_key not in HF_MODEL_PRESETS:
+        raise ValueError(f"unknown HF preset {preset_key!r}")
+    preset = HF_MODEL_PRESETS[preset_key]
+    if not preset.finetune_eligible:
+        reason = preset.finetune_reason or "not a causal LoRA SFT target in this trainer"
+        raise ValueError(f"preset {preset_key!r} cannot be finetuned: {reason}")
+    if preset.finetune_requires_allow_large and not allow_large:
+        raise ValueError(
+            f"preset {preset_key!r} is 70B-class. Pass allow_large=true if VRAM is enough. "
+            f"{preset.finetune_reason}".strip()
+        )
+    return preset
 
 
 def resolve_preset_dir(preset_key: str, cwd: Path | None = None) -> Path:
@@ -201,9 +298,9 @@ def preset_has_weights(preset_key: str, cwd: Path | None = None) -> bool:
 
 
 def local_only_model_dirs(cwd: Path | None = None) -> list[Path]:
-    from utils.device.env_bootstrap import orodruin_project_root
+    from utils.device.env_bootstrap import sophon_project_root
 
-    base = cwd if cwd is not None else orodruin_project_root()
+    base = cwd if cwd is not None else sophon_project_root()
     models_root = base / "models"
     if not models_root.is_dir():
         return []
@@ -246,9 +343,9 @@ PREFERRED_DEFAULT_KEY = "llama2_7b_chat"
 
 
 def preset_key_for_dir(model_dir: Path, cwd: Path | None = None) -> str | None:
-    from utils.device.env_bootstrap import orodruin_project_root
+    from utils.device.env_bootstrap import sophon_project_root
 
-    base = cwd if cwd is not None else orodruin_project_root()
+    base = cwd if cwd is not None else sophon_project_root()
     want = model_dir.expanduser().resolve()
     for key in preset_keys_sorted():
         if resolve_preset_dir(key, base).resolve() == want:
@@ -257,9 +354,9 @@ def preset_key_for_dir(model_dir: Path, cwd: Path | None = None) -> str | None:
 
 
 def default_local_preset_key(cwd: Path | None = None) -> str | None:
-    from utils.device.env_bootstrap import orodruin_project_root
+    from utils.device.env_bootstrap import sophon_project_root
 
-    base = cwd if cwd is not None else orodruin_project_root()
+    base = cwd if cwd is not None else sophon_project_root()
     if preset_has_weights(PREFERRED_DEFAULT_KEY, base):
         return PREFERRED_DEFAULT_KEY
     for key in preset_keys_sorted():
@@ -276,9 +373,9 @@ def resolve_chat_startup_model(
     model: str | None,
     cwd: Path | None = None,
 ) -> tuple[str | None, Path]:
-    from utils.device.env_bootstrap import orodruin_project_root
+    from utils.device.env_bootstrap import sophon_project_root
 
-    base = cwd if cwd is not None else orodruin_project_root()
+    base = cwd if cwd is not None else sophon_project_root()
     fallback_dir = resolve_preset_dir(PREFERRED_DEFAULT_KEY, base)
 
     if preset is not None:
@@ -287,7 +384,7 @@ def resolve_chat_startup_model(
         path = Path(model).expanduser().resolve()
         return preset_key_for_dir(path, base), path
 
-    env_preset = os.environ.get("ORODRUIN_HF_PRESET", "").strip()
+    env_preset = os.environ.get("SOPHON_HF_PRESET", "").strip()
     if env_preset in HF_MODEL_PRESETS and preset_has_weights(env_preset, base):
         return env_preset, resolve_preset_dir(env_preset, base)
 
@@ -314,10 +411,10 @@ def resolve_chat_startup_model(
 
 
 def default_preset_key() -> str:
-    from utils.device.env_bootstrap import orodruin_project_root
+    from utils.device.env_bootstrap import sophon_project_root
 
-    base = orodruin_project_root()
-    raw = os.environ.get("ORODRUIN_HF_PRESET", "").strip()
+    base = sophon_project_root()
+    raw = os.environ.get("SOPHON_HF_PRESET", "").strip()
     if raw in HF_MODEL_PRESETS:
         return raw
     env_path = os.environ.get("GEMMA4_MODEL", "").strip()

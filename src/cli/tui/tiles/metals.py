@@ -17,7 +17,7 @@ _LABELS = {
 
 
 def _symbols() -> list[str]:
-    raw = os.environ.get("ORODRUIN_METALS_SYMBOLS", "GC=F,SI=F").strip()
+    raw = os.environ.get("SOPHON_METALS_SYMBOLS", "GC=F,SI=F").strip()
     parts = [part.strip().upper() for part in raw.split(",") if part.strip()]
     return parts or ["GC=F", "SI=F"]
 

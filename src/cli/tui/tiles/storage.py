@@ -10,10 +10,10 @@ from textual.containers import Vertical
 from textual.widgets import Static
 
 from cli.tui.tiles.base import BaseTile, TileState
-from utils.device.env_bootstrap import orodruin_project_root
+from utils.device.env_bootstrap import sophon_project_root
 
 _FILETYPE_CACHE_S = 300.0
-_FILETYPE_ROOTS_ENV = "ORODRUIN_SYSTEM_FILETYPE_ROOTS"
+_FILETYPE_ROOTS_ENV = "SOPHON_SYSTEM_FILETYPE_ROOTS"
 _FILETYPE_MAX_FILES = 8_000
 _MAX_DISKS = 4
 _BAR_WIDTH = 10
@@ -76,7 +76,7 @@ def _filetype_roots() -> list[Path]:
     raw = os.environ.get(_FILETYPE_ROOTS_ENV, "").strip()
     if raw:
         return [Path(part.strip()).expanduser() for part in raw.split(";") if part.strip()]
-    return [orodruin_project_root()]
+    return [sophon_project_root()]
 
 
 def collect_filetypes() -> dict[str, Any]:

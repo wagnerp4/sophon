@@ -16,7 +16,7 @@ def _http_json(
     headers: dict[str, str] | None = None,
     timeout_s: float = 30.0,
 ) -> Any:
-    hdrs = {"User-Agent": "orodruin-chat/0.1", "Accept": "application/json"}
+    hdrs = {"User-Agent": "sophon-chat/0.1", "Accept": "application/json"}
     if headers:
         hdrs.update(headers)
     data = None
@@ -95,6 +95,7 @@ class ChatCompletionResult:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     finish_reason: str | None = None
+    reasoning: str | None = None
 
 
 def _parse_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
@@ -150,7 +151,15 @@ def _message_text(message: dict[str, Any]) -> str:
     text = _content_to_text(message.get("content")).strip()
     if text:
         return text
-    for key in ("reasoning_content", "reasoning", "refusal", "text"):
+    for key in ("refusal", "text"):
+        alt = _content_to_text(message.get(key)).strip()
+        if alt:
+            return alt
+    return ""
+
+
+def _message_reasoning(message: dict[str, Any]) -> str:
+    for key in ("reasoning_content", "reasoning"):
         alt = _content_to_text(message.get(key)).strip()
         if alt:
             return alt
@@ -169,12 +178,16 @@ def chat_completions(
     timeout_s: float = 600.0,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: str | dict[str, Any] | None = None,
+    max_token_field: str = "max_tokens",
+    extra_headers: dict[str, str] | None = None,
 ) -> ChatCompletionResult:
     url = f"{base_url.rstrip('/')}/chat/completions"
+    # TODO: stream SSE tokens into the TUI heartbeat
+    token_field = max_token_field if max_token_field in ("max_tokens", "max_completion_tokens") else "max_tokens"
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": int(max_tokens),
+        token_field: int(max_tokens),
         "stream": False,
     }
     if temperature is not None:
@@ -186,6 +199,8 @@ def chat_completions(
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
     headers: dict[str, str] = {}
+    if extra_headers:
+        headers.update(extra_headers)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     data = _http_json("POST", url, body=body, headers=headers, timeout_s=timeout_s)
@@ -197,11 +212,14 @@ def chat_completions(
     text = _message_text(message)
     if not text:
         text = _content_to_text(choice0.get("text")).strip()
-    if not text:
-        text = _content_to_text(choice0.get("reasoning_content")).strip()
+    reasoning = _message_reasoning(message)
+    if not reasoning:
+        reasoning = _content_to_text(choice0.get("reasoning_content")).strip()
     tool_calls = _parse_tool_calls(message)
     finish = choice0.get("finish_reason")
     finish_reason = str(finish) if finish is not None else None
+    if not text and reasoning and not tool_calls:
+        text = reasoning
     if not text and not tool_calls:
         raise RuntimeError(
             f"empty assistant message (finish_reason={finish_reason!r}; no content/tool_calls)"
@@ -223,4 +241,5 @@ def chat_completions(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         finish_reason=finish_reason,
+        reasoning=reasoning or None,
     )

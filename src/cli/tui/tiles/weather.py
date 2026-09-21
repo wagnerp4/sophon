@@ -83,20 +83,20 @@ def _ip_geolocate() -> tuple[float, float, str]:
     raise ValueError(
         "could not auto-detect location "
         f"({'; '.join(errors) if errors else 'no geo endpoint'}); "
-        "set ORODRUIN_WEATHER_LAT/LON or ORODRUIN_WEATHER_QUERY"
+        "set SOPHON_WEATHER_LAT/LON or SOPHON_WEATHER_QUERY"
     )
 
 
 def _resolve_coords() -> tuple[float, float, str]:
-    lat_raw = os.environ.get("ORODRUIN_WEATHER_LAT", "").strip()
-    lon_raw = os.environ.get("ORODRUIN_WEATHER_LON", "").strip()
+    lat_raw = os.environ.get("SOPHON_WEATHER_LAT", "").strip()
+    lon_raw = os.environ.get("SOPHON_WEATHER_LON", "").strip()
     if lat_raw and lon_raw:
-        label = os.environ.get("ORODRUIN_WEATHER_QUERY", "").strip()
+        label = os.environ.get("SOPHON_WEATHER_QUERY", "").strip()
         lat_f, lon_f = float(lat_raw), float(lon_raw)
         if not label:
             label = _reverse_geocode(lat_f, lon_f)
         return lat_f, lon_f, label
-    query = os.environ.get("ORODRUIN_WEATHER_QUERY", "").strip()
+    query = os.environ.get("SOPHON_WEATHER_QUERY", "").strip()
     if query:
         geo_url = (
             "https://geocoding-api.open-meteo.com/v1/search"
@@ -116,7 +116,7 @@ def _resolve_coords() -> tuple[float, float, str]:
 
 
 def _want_aqi() -> bool:
-    raw = os.environ.get("ORODRUIN_WEATHER_AQI", "1").strip().lower()
+    raw = os.environ.get("SOPHON_WEATHER_AQI", "1").strip().lower()
     return raw not in ("", "0", "false", "no", "off")
 
 
@@ -159,7 +159,7 @@ def _fetch_aqi(lat: float, lon: float, tz: str) -> dict[str, Any] | None:
 
 def _fetch_weather() -> TileState:
     lat, lon, label = _resolve_coords()
-    tz = os.environ.get("ORODRUIN_WEATHER_TZ", "").strip() or "auto"
+    tz = os.environ.get("SOPHON_WEATHER_TZ", "").strip() or "auto"
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"

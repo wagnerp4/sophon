@@ -21,14 +21,14 @@ def _uv_toad_candidates() -> list[Path]:
 
 
 def _local_toad_repo_candidates() -> list[Path]:
-    explicit = os.environ.get("ORODRUIN_TOAD_HOME", "").strip()
+    explicit = os.environ.get("SOPHON_TOAD_HOME", "").strip()
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
     try:
-        from utils.device.env_bootstrap import orodruin_project_root
+        from utils.device.env_bootstrap import sophon_project_root
 
-        root = orodruin_project_root()
+        root = sophon_project_root()
         candidates.extend(
             [
                 root.parent / "Repos" / "Agentic" / "toad",
@@ -41,7 +41,7 @@ def _local_toad_repo_candidates() -> list[Path]:
 
 
 def resolve_toad_command() -> list[str] | None:
-    explicit = os.environ.get("ORODRUIN_TOAD_BIN", "").strip() or os.environ.get("TOAD_BIN", "").strip()
+    explicit = os.environ.get("SOPHON_TOAD_BIN", "").strip() or os.environ.get("TOAD_BIN", "").strip()
     if explicit:
         return [explicit]
 
@@ -74,7 +74,7 @@ def resolve_toad_command() -> list[str] | None:
 def _toad_windows_native_unstable() -> bool:
     if sys.platform != "win32":
         return False
-    allow = os.environ.get("ORODRUIN_TOAD_ALLOW_WINDOWS", "").strip().lower()
+    allow = os.environ.get("SOPHON_TOAD_ALLOW_WINDOWS", "").strip().lower()
     return allow not in ("1", "true", "yes")
 
 
@@ -83,15 +83,15 @@ def _toad_windows_blocked_message() -> str:
         "Toad is not supported on native Windows (upstream targets Linux/macOS).",
         "Launching it here typically exits with code 0xC0000005 (access violation).",
         "",
-        "Use orodruin Textual instead:",
-        "  orodruin-cli chat --tui --interface textual --preset llama2_7b_chat",
+        "Use sophon Textual instead:",
+        "  sophon-cli chat --tui --interface textual --preset llama2_7b_chat",
         "",
-        "Or run Toad inside WSL/Linux/macOS, then bridge orodruin with:",
-        "  !orodruin-chat-tui --no-spawn-window --preset llama2_7b_chat",
+        "Or run Toad inside WSL/Linux/macOS, then bridge sophon with:",
+        "  !sophon-chat-tui --no-spawn-window --preset llama2_7b_chat",
         "",
-        "To attempt native Windows launch anyway (UTF-8 console, no orodruin WT profile):",
-        "  $env:ORODRUIN_TOAD_ALLOW_WINDOWS = \"1\"",
-        "  orodruin-cli chat --interface toad --preset llama2_7b_chat",
+        "To attempt native Windows launch anyway (UTF-8 console, no sophon WT profile):",
+        "  $env:SOPHON_TOAD_ALLOW_WINDOWS = \"1\"",
+        "  sophon-cli chat --interface toad --preset llama2_7b_chat",
     ]
     return "\n".join(lines)
 
@@ -107,18 +107,18 @@ def _toad_missing_message() -> str:
         "Then ensure uv tools are on PATH (PowerShell, current session):",
         '  $env:PATH = "$env:USERPROFILE\\.local\\bin;$env:PATH"',
         "",
-        "Or point orodruin at a specific binary:",
-        "  $env:ORODRUIN_TOAD_BIN = \"$env:USERPROFILE\\.local\\bin\\toad.exe\"",
+        "Or point sophon at a specific binary:",
+        "  $env:SOPHON_TOAD_BIN = \"$env:USERPROFILE\\.local\\bin\\toad.exe\"",
         "",
         "Local clone option:",
-        "  $env:ORODRUIN_TOAD_HOME = \"C:\\Software\\Python\\NLP\\Repos\\Agentic\\toad\"",
-        "  cd $env:ORODRUIN_TOAD_HOME; uv sync",
+        "  $env:SOPHON_TOAD_HOME = \"C:\\Software\\Python\\NLP\\Repos\\Agentic\\toad\"",
+        "  cd $env:SOPHON_TOAD_HOME; uv sync",
         "",
         "Note: upstream Toad targets Linux/macOS first. On Windows, WSL is the most",
         "stable host if native launch misbehaves.",
         "",
-        "Use orodruin Textual instead:",
-        "  orodruin-cli chat --tui --interface textual --preset llama2_7b_chat",
+        "Use sophon Textual instead:",
+        "  sophon-cli chat --tui --interface textual --preset llama2_7b_chat",
     ]
     return "\n".join(lines)
 
@@ -132,43 +132,43 @@ def launch(user_argv: list[str]) -> int:
         raise SystemExit(_toad_windows_blocked_message())
 
     try:
-        from utils.device.env_bootstrap import orodruin_project_root
+        from utils.device.env_bootstrap import sophon_project_root
 
-        root = orodruin_project_root()
+        root = sophon_project_root()
     except Exception:
         root = None
 
     if root is not None:
         guide = root / "integrations" / "toad" / "README.md"
         if guide.is_file():
-            print(f"[orodruin] Toad integration guide: {guide}", flush=True)
+            print(f"[sophon] Toad integration guide: {guide}", flush=True)
 
-    print(f"[orodruin] Using Toad: {' '.join(command)}", flush=True)
+    print(f"[sophon] Using Toad: {' '.join(command)}", flush=True)
     print(
-        "[orodruin] Inside Toad shell run: !orodruin-chat-tui --no-spawn-window --preset llama2_7b_chat",
+        "[sophon] Inside Toad shell run: !sophon-chat-tui --no-spawn-window --preset llama2_7b_chat",
         flush=True,
     )
 
     from cli.host.spawn import child_runtime_env, project_root, spawn_desktop_terminal
 
     env = child_runtime_env(os.environ.copy())
-    env["ORODRUIN_INTERFACE"] = "toad"
+    env["SOPHON_INTERFACE"] = "toad"
     cwd = str(project_root())
     spawn_desktop_terminal(
         command,
         env,
         cwd,
         window_title="toad",
-        use_orodruin_profile=False,
+        use_sophon_profile=False,
         utf8_console=True,
     )
-    print("[orodruin] Toad opened in a desktop terminal (UTF-8 console).", flush=True)
+    print("[sophon] Toad opened in a desktop terminal (UTF-8 console).", flush=True)
     print(
-        "[orodruin] If the window closes instantly, Toad may not be stable on native Windows.",
+        "[sophon] If the window closes instantly, Toad may not be stable on native Windows.",
         flush=True,
     )
     print(
-        "[orodruin] Use WSL/Linux/macOS, or orodruin Textual: orodruin-cli chat --tui --interface textual",
+        "[sophon] Use WSL/Linux/macOS, or sophon Textual: sophon-cli chat --tui --interface textual",
         flush=True,
     )
     return 0

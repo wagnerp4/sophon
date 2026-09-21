@@ -82,7 +82,7 @@ def run_direct(repo_id: str, local_dir: Path, token: str | bool) -> _TimingState
     return state
 
 
-def run_orodruin(preset_key: str) -> _TimingState:
+def run_sophon(preset_key: str) -> _TimingState:
     state = _TimingState()
 
     def on_status(text: str) -> None:
@@ -91,8 +91,8 @@ def run_orodruin(preset_key: str) -> _TimingState:
     tqdm_class = hub_tqdm_bridge_factory(throttled_progress_callback(state.on_progress, min_interval_s=0.5))
     configure_hub_verbose(force_tqdm=True)
     os.environ["TQDM_POSITION"] = "-1"
-    print(f"[orodruin] preset={preset_key}", flush=True)
-    print("[orodruin] download_preset_snapshot + verbose logging + log capture (same as TUI worker)", flush=True)
+    print(f"[sophon] preset={preset_key}", flush=True)
+    print("[sophon] download_preset_snapshot + verbose logging + log capture (same as TUI worker)", flush=True)
     local_dir = resolve_preset_dir(preset_key, ROOT)
     with watch_local_download_bytes(local_dir, state.on_disk):
         with capture_hub_download_logs(state.on_log, min_interval_s=0.8):
@@ -126,8 +126,8 @@ def print_report(mode: str, state: _TimingState) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare direct vs orodruin Hub download wiring.")
-    parser.add_argument("--mode", choices=("direct", "orodruin", "both"), default="direct")
+    parser = argparse.ArgumentParser(description="Compare direct vs sophon Hub download wiring.")
+    parser.add_argument("--mode", choices=("direct", "sophon", "both"), default="direct")
     parser.add_argument("--preset", default="gemma4_12b_it")
     parser.add_argument(
         "--local-dir",
@@ -148,12 +148,12 @@ def main() -> None:
         state = run_direct(repo_id, local_dir, token)
         print_report("direct", state)
 
-    if args.mode in ("orodruin", "both"):
+    if args.mode in ("sophon", "both"):
         if args.mode == "both" and not args.local_dir:
-            print("\n[orodruin] skipped in 'both' without --local-dir (avoid writing same tree twice)", flush=True)
+            print("\n[sophon] skipped in 'both' without --local-dir (avoid writing same tree twice)", flush=True)
         else:
-            state = run_orodruin(preset_key)
-            print_report("orodruin", state)
+            state = run_sophon(preset_key)
+            print_report("sophon", state)
 
 
 if __name__ == "__main__":

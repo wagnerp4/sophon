@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from pathlib import Path
@@ -225,3 +226,134 @@ def paths_still_in_text(text: str, paths: list[Path]) -> bool:
         if needle not in hay and path.name not in text:
             return False
     return True
+
+
+_AT_TOKEN_RE = re.compile(r"(?<![\w/\\])@([^\s]+)")
+_SKIP_SCAN_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+}
+
+
+def mention_roots(extra: list[Path] | None = None) -> list[Path]:
+    from processing.text.retrieval.corpus.sources import read_vault_path_from_env
+    from utils.device.env_bootstrap import sophon_project_root
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    candidates = [sophon_project_root(), Path.cwd()]
+    vault = read_vault_path_from_env()
+    if vault is not None:
+        candidates.append(vault)
+    if extra:
+        candidates.extend(extra)
+    for item in candidates:
+        try:
+            resolved = item.expanduser().resolve()
+        except OSError:
+            continue
+        if not resolved.is_dir():
+            continue
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def extract_at_tokens(text: str) -> list[str]:
+    return [tok.rstrip(".,;:)") for tok in _AT_TOKEN_RE.findall(text or "")]
+
+
+def resolve_mention_path(token: str, roots: list[Path]) -> Path | None:
+    raw = (token or "").strip().strip("\"'")
+    if not raw:
+        return None
+    direct = Path(raw).expanduser()
+    try:
+        if direct.is_file():
+            return direct.resolve()
+    except OSError:
+        pass
+    for root in roots:
+        candidate = (root / raw).expanduser()
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    name = Path(raw).name.lower()
+    for root in roots:
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in _SKIP_SCAN_DIRS]
+                for filename in filenames:
+                    if filename.lower() == name:
+                        return Path(dirpath) / filename
+        except OSError:
+            continue
+    return None
+
+
+def suggest_at_completion(fragment: str, roots: list[Path], *, limit: int = 400) -> str | None:
+    # TODO: cache workspace/vault file lists instead of walking on each keystroke
+    needle = (fragment or "").replace("\\", "/").lower()
+    hits: list[str] = []
+    for root in roots:
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in _SKIP_SCAN_DIRS]
+                rel_dir = Path(dirpath).relative_to(root).as_posix()
+                for filename in filenames:
+                    rel = filename if rel_dir in (".", "") else rel_dir + "/" + filename
+                    lowered = rel.lower()
+                    if needle and not lowered.startswith(needle) and needle not in lowered:
+                        continue
+                    hits.append(rel)
+                    if len(hits) >= limit:
+                        break
+                if len(hits) >= limit:
+                    break
+        except OSError:
+            continue
+        if len(hits) >= limit:
+            break
+    if not hits:
+        return None
+    if needle:
+        hits.sort(key=lambda item: (0 if item.lower().startswith(needle) else 1, len(item), item.lower()))
+    else:
+        hits.sort(key=lambda item: item.lower())
+    return hits[0]
+
+
+def expand_at_paths(text: str, roots: list[Path], *, attach: bool) -> str:
+    tokens = extract_at_tokens(text)
+    if not tokens:
+        return text
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for token in tokens:
+        path = resolve_mention_path(token, roots)
+        if path is None:
+            continue
+        key = str(path).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(path)
+    if not resolved:
+        return text
+    if not attach:
+        return text
+    return build_message_with_attachments(text, resolved)
+

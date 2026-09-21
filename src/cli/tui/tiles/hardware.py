@@ -21,7 +21,7 @@ from cli.tui.tiles.base import (
 
 def _queries() -> list[str]:
     raw = os.environ.get(
-        "ORODRUIN_HARDWARE_QUERIES",
+        "SOPHON_HARDWARE_QUERIES",
         "RTX 4090,RTX 3090,Ryzen 9 7950X",
     ).strip()
     parts = [part.strip() for part in raw.split(",") if part.strip()]
@@ -29,8 +29,8 @@ def _queries() -> list[str]:
 
 
 def _credentials() -> tuple[str, str] | None:
-    client_id = os.environ.get("ORODRUIN_EBAY_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("ORODRUIN_EBAY_CLIENT_SECRET", "").strip()
+    client_id = os.environ.get("SOPHON_EBAY_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("SOPHON_EBAY_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
         return None
     return client_id, client_secret
@@ -84,7 +84,7 @@ def _fetch_ebay_token(client_id: str, client_secret: str) -> str:
         headers={
             "Content-Type": "application/x-www-form-urlencoded",
             "Authorization": f"Basic {basic}",
-            "User-Agent": "orodruin-dashboard/0.1",
+            "User-Agent": "sophon-dashboard/0.1",
         },
         method="POST",
     )
@@ -153,7 +153,7 @@ def _fetch_hardware() -> TileState:
             ok=False,
             text=(
                 "hardware\n"
-                "set ORODRUIN_EBAY_CLIENT_ID / ORODRUIN_EBAY_CLIENT_SECRET\n"
+                "set SOPHON_EBAY_CLIENT_ID / SOPHON_EBAY_CLIENT_SECRET\n"
                 "(asking prices via eBay Browse; sold history not available)"
             ),
             fetched_at=time.time(),

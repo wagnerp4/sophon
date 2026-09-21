@@ -1,0 +1,6 @@
+workspace: .
+mode: agent
+permissions:
+  allow: []
+  ask: []
+  deny: []

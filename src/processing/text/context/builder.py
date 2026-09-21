@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 from ..retrieval.types import RetrievalResult
 
 from .types import ContextBuildResult, Message
+
+if TYPE_CHECKING:
+    from ..memory.budget import MemoryPack
 
 _DEFAULT_RETRIEVAL_HEADER = "Retrieved context (use only if relevant):"
 _DEFAULT_MEMORY_HEADER = "Earlier conversation summary:"
@@ -67,11 +70,29 @@ def render_memory_block(
     return "\n".join(lines).strip()
 
 
+def render_memory_pack(pack: "MemoryPack | None") -> str | None:
+    """Render a budgeted five-tier memory pack into one system block."""
+    if pack is None or pack.is_empty():
+        return None
+    lines = ["Memory (persisted across sessions; verify before acting):"]
+    for section in pack.sections:
+        if not section.lines:
+            continue
+        lines.append(f"{section.header}:")
+        for item in section.lines:
+            lines.append(f"- {item}")
+    if pack.total_dropped > 0:
+        lines.append(f"(memory: {pack.total_dropped} entr(y/ies) dropped for budget)")
+    return "\n".join(lines).strip()
+
+
 def build_messages_for_model(
     base_messages: list[Message],
     *,
     retrieval: RetrievalResult | None = None,
     memory_turns: Iterable[object] | None = None,
+    memory_pack: "MemoryPack | None" = None,
+    skills_block: str | None = None,
     system_text: str | None = None,
     max_retrieval_chunks: int = 5,
     max_retrieval_chars: int = 800,
@@ -94,11 +115,18 @@ def build_messages_for_model(
         max_chunks=max_retrieval_chunks,
         max_chars_per_chunk=max_retrieval_chars,
     )
-    memory_block = render_memory_block(memory_turns or (), max_turns=max_memory_turns)
+    pack_block = render_memory_pack(memory_pack)
+    if pack_block:
+        memory_block = pack_block
+    else:
+        memory_block = render_memory_block(memory_turns or (), max_turns=max_memory_turns)
 
     if memory_block:
         out.append({"role": "system", "content": memory_block})
         injected.append("memory")
+    if skills_block and str(skills_block).strip():
+        out.append({"role": "system", "content": str(skills_block).strip()})
+        injected.append("skills")
     if retrieval_block:
         out.append({"role": "system", "content": retrieval_block})
         injected.append("retrieval")

@@ -18,7 +18,7 @@ from cli.host.session_log import make_session_log_path
 
 
 def is_tui_child_process() -> bool:
-    return os.environ.get("ORODRUIN_TUI_CHILD", "").strip() in ("1", "true", "yes")
+    return os.environ.get("SOPHON_TUI_CHILD", "").strip() in ("1", "true", "yes")
 
 
 def _strip_spawn_flags(argv: list[str]) -> list[str]:
@@ -32,9 +32,9 @@ def _strip_spawn_flags(argv: list[str]) -> list[str]:
 
 def project_root() -> Path:
     try:
-        from utils.device.env_bootstrap import orodruin_project_root
+        from utils.device.env_bootstrap import sophon_project_root
 
-        return orodruin_project_root()
+        return sophon_project_root()
     except Exception:
         return Path.cwd().resolve()
 
@@ -90,13 +90,13 @@ def _spawn_windows(
     cwd: str,
     *,
     window_title: str,
-    use_orodruin_profile: bool,
+    use_sophon_profile: bool,
     utf8_console: bool,
 ) -> subprocess.Popen[bytes]:
     wt = shutil.which("wt") or shutil.which("wt.exe")
     if wt:
-        profile = "orodruin chat"
-        use_profile = use_orodruin_profile
+        profile = "sophon chat"
+        use_profile = use_sophon_profile
         if use_profile:
             try:
                 use_profile = windows_profile_installed()
@@ -133,7 +133,7 @@ def _spawn_windows(
 
 
 def _spawn_macos(command: list[str], env: dict[str, str], cwd: str) -> subprocess.Popen[bytes]:
-    env_prefix = " ".join(f'{key}="{env[key]}"' for key in ("ORODRUIN_TUI_LOG", "ORODRUIN_TUI_CHILD") if key in env)
+    env_prefix = " ".join(f'{key}="{env[key]}"' for key in ("SOPHON_TUI_LOG", "SOPHON_TUI_CHILD") if key in env)
     cmd = " ".join(shlex.quote(part) for part in command)
     shell_cmd = f"cd {shlex.quote(cwd)}; {env_prefix} {cmd}"
     script = f'tell application "Terminal" to do script {shlex.quote(shell_cmd)}'
@@ -145,11 +145,34 @@ def _spawn_linux(
     env: dict[str, str],
     cwd: str,
     *,
-    window_title: str = "orodruin chat",
+    window_title: str = "sophon chat",
 ) -> subprocess.Popen[bytes]:
+    from utils.device.platform import is_wsl, sophon_windows_root
+
+    if is_wsl():
+        cmd = shutil.which("cmd.exe")
+        if cmd:
+            return subprocess.Popen(
+                [
+                    cmd,
+                    "/c",
+                    "start",
+                    "wt.exe",
+                    "-w",
+                    "0",
+                    "nt",
+                    "-p",
+                    profile_name(),
+                    "-d",
+                    sophon_windows_root(),
+                ],
+                env=env,
+                cwd="/mnt/c/Windows",
+            )
     raise RuntimeError(
-        "Linux desktop TUI spawn is not implemented yet. "
-        "Use --no-spawn-window or run from Windows with .venv/Scripts/orodruin-cli.exe."
+        "Linux desktop TUI spawn needs Windows Terminal from WSL. "
+        "Run sophon-cli deploy-windows, then sophon-cli chat --windows, "
+        "or use --no-spawn-window."
     )
 
 
@@ -158,8 +181,8 @@ def spawn_desktop_terminal(
     env: dict[str, str],
     cwd: str,
     *,
-    window_title: str = "orodruin chat",
-    use_orodruin_profile: bool = True,
+    window_title: str = "sophon chat",
+    use_sophon_profile: bool = True,
     utf8_console: bool = True,
 ) -> subprocess.Popen[bytes]:
     if sys.platform == "win32":
@@ -168,7 +191,7 @@ def spawn_desktop_terminal(
             env,
             cwd,
             window_title=window_title,
-            use_orodruin_profile=use_orodruin_profile,
+            use_sophon_profile=use_sophon_profile,
             utf8_console=utf8_console,
         )
     if sys.platform == "darwin":
@@ -177,9 +200,9 @@ def spawn_desktop_terminal(
 
 
 def _print_parent_header(log_path: Path, pid: int) -> None:
-    print(f"[orodruin] Desktop TUI launched (pid={pid})", flush=True)
-    print(f"[orodruin] Log file: {log_path}", flush=True)
-    print("[orodruin] --- mirrored session log ---", flush=True)
+    print(f"[sophon] Desktop TUI launched (pid={pid})", flush=True)
+    print(f"[sophon] Log file: {log_path}", flush=True)
+    print("[sophon] --- mirrored session log ---", flush=True)
 
 
 def _drain_log(log_path: Path, offset: int) -> int:
@@ -194,7 +217,7 @@ def _drain_log(log_path: Path, offset: int) -> int:
                 sys.stdout.flush()
             return handle.tell()
     except OSError as exc:
-        print(f"[orodruin] Log read failed ({log_path}): {exc}", flush=True)
+        print(f"[sophon] Log read failed ({log_path}): {exc}", flush=True)
         return offset
 
 
@@ -250,30 +273,30 @@ def tail_log_until_exit(
     offset = log_offset_at_launch
     child_pid = _read_child_pid(log_path, log_offset_at_launch=log_offset_at_launch)
     if child_pid is None:
-        print("[orodruin] Timed out waiting for desktop TUI process.", flush=True)
+        print("[sophon] Timed out waiting for desktop TUI process.", flush=True)
         return 1
 
-    print(f"[orodruin] Tracking desktop TUI pid={child_pid}", flush=True)
+    print(f"[sophon] Tracking desktop TUI pid={child_pid}", flush=True)
     while _process_running(child_pid):
         offset = _drain_log(log_path, offset)
         time.sleep(0.15)
 
     offset = _drain_log(log_path, offset)
-    print("[orodruin] Desktop TUI closed.", flush=True)
+    print("[sophon] Desktop TUI closed.", flush=True)
     return 0
 
 
 def launch_tui_in_new_terminal(user_argv: list[str]) -> int:
-    from utils.device.env_bootstrap import load_orodruin_dotenv
+    from utils.device.env_bootstrap import load_sophon_dotenv
 
-    load_orodruin_dotenv()
+    load_sophon_dotenv()
     log_path = make_session_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_offset_at_launch = log_path.stat().st_size if log_path.is_file() else 0
 
     env = child_runtime_env(os.environ.copy())
-    env["ORODRUIN_TUI_LOG"] = str(log_path.resolve())
-    env["ORODRUIN_TUI_CHILD"] = "1"
+    env["SOPHON_TUI_LOG"] = str(log_path.resolve())
+    env["SOPHON_TUI_CHILD"] = "1"
 
     command = build_child_argv(user_argv)
     cwd = str(project_root())
@@ -281,14 +304,14 @@ def launch_tui_in_new_terminal(user_argv: list[str]) -> int:
         if sys.platform == "win32" and not windows_profile_installed():
             installed = install_windows_terminal_profile()
             if installed is not None:
-                print(f"[orodruin] Installed Windows Terminal profile: {installed}", flush=True)
+                print(f"[sophon] Installed Windows Terminal profile: {installed}", flush=True)
     except Exception:
         pass
 
     try:
         proc = spawn_desktop_terminal(command, env, cwd)
     except RuntimeError as exc:
-        print(f"[orodruin] {exc}", flush=True)
+        print(f"[sophon] {exc}", flush=True)
         return 1
     _print_parent_header(log_path.resolve(), proc.pid)
     return tail_log_until_exit(

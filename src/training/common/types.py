@@ -20,6 +20,9 @@ class RunMeta:
     recipe: dict[str, Any] = field(default_factory=dict)
     train_metrics: dict[str, Any] = field(default_factory=dict)
     smoke_eval: dict[str, Any] = field(default_factory=dict)
+    parent_adapter: str | None = None
+    stage_id: str | None = None
+    adapter_name: str | None = None
 
     def write_json(self, path: Path) -> None:
         import json
@@ -34,6 +37,9 @@ class RunMeta:
             "recipe": self.recipe,
             "train_metrics": self.train_metrics,
             "smoke_eval": self.smoke_eval,
+            "parent_adapter": self.parent_adapter,
+            "stage_id": self.stage_id,
+            "adapter_name": self.adapter_name,
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -52,4 +58,7 @@ class RunMeta:
             recipe=dict(raw.get("recipe") or {}),
             train_metrics=dict(raw.get("train_metrics") or {}),
             smoke_eval=dict(raw.get("smoke_eval") or {}),
+            parent_adapter=str(raw["parent_adapter"]) if raw.get("parent_adapter") else None,
+            stage_id=str(raw["stage_id"]) if raw.get("stage_id") else None,
+            adapter_name=str(raw["adapter_name"]) if raw.get("adapter_name") else None,
         )

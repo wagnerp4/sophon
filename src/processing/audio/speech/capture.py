@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from collections import deque
+import threading
+import time
 from typing import Callable
 
 import numpy as np
@@ -9,18 +10,26 @@ import numpy as np
 StatusFn = Callable[[str], None]
 
 
-def listen_seconds_default() -> float:
-    raw = os.environ.get("ORODRUIN_SST_LISTEN_S") or os.environ.get("ORODRUIN_LISTEN_SECONDS", "30")
+def record_max_seconds_default() -> float:
+    raw = (
+        os.environ.get("SOPHON_SST_MAX_S")
+        or os.environ.get("SOPHON_SST_LISTEN_S")
+        or os.environ.get("SOPHON_LISTEN_SECONDS", "120")
+    )
     token = raw.strip()
     try:
-        value = float(token) if token else 30.0
+        value = float(token) if token else 120.0
     except ValueError:
-        value = 30.0
-    return max(1.0, min(value, 120.0))
+        value = 120.0
+    return max(2.0, min(value, 300.0))
+
+
+def listen_seconds_default() -> float:
+    return record_max_seconds_default()
 
 
 def _input_device() -> int | str | None:
-    raw = os.environ.get("ORODRUIN_SST_MIC", "").strip()
+    raw = os.environ.get("SOPHON_SST_MIC", "").strip()
     if raw == "":
         return None
     if raw.isdigit() or (raw.startswith("-") and raw[1:].isdigit()):
@@ -28,8 +37,8 @@ def _input_device() -> int | str | None:
     return raw
 
 
-def _vad_rms() -> float:
-    raw = os.environ.get("ORODRUIN_SST_VAD_RMS", "0.012").strip()
+def quiet_rms_threshold() -> float:
+    raw = os.environ.get("SOPHON_SST_VAD_RMS", "0.012").strip()
     try:
         value = float(raw) if raw else 0.012
     except ValueError:
@@ -38,89 +47,215 @@ def _vad_rms() -> float:
 
 
 def _capture_failure(exc: BaseException) -> RuntimeError:
-    hint = " Use Windows native orodruin-cli for WASAPI input, not WSL."
+    hint = " Use Windows native sophon-cli for WASAPI input, not WSL."
     try:
         from utils.device.platform import is_wsl
 
         if not is_wsl() and os.name != "posix":
-            hint = " Check the default input device, ORODRUIN_SST_MIC, and microphone permissions."
+            hint = " Check the default input device, SOPHON_SST_MIC, and microphone permissions."
         elif not is_wsl():
-            hint = " Check the default input device and ORODRUIN_SST_MIC."
+            hint = " Check the default input device and SOPHON_SST_MIC."
     except Exception:
         pass
     return RuntimeError(f"microphone capture failed ({exc}).{hint}")
 
 
-def record_push_to_talk(
-    *,
-    sample_rate: int = 16000,
-    max_seconds: float = 30.0,
-    on_status: StatusFn | None = None,
-) -> tuple[np.ndarray, int]:
-    # TODO(sst): hold-to-talk keydown/keyup in the TUI instead of energy-VAD-only stop.
-    # TODO(sst): optional Silero VAD when energy gating misfires on noisy mics.
-    try:
-        import sounddevice as sd
-    except ImportError as exc:
-        raise ImportError("sounddevice unavailable - install with: uv sync --extra sst") from exc
+def describe_capture(wave: np.ndarray, sample_rate: int, peak_rms: float) -> str:
+    rate = max(int(sample_rate), 1)
+    samples = int(np.asarray(wave).size)
+    duration = samples / float(rate)
+    return f"{duration:.1f}s · {samples} samples · peak RMS {peak_rms:.4f}"
 
-    rate = max(8000, int(sample_rate))
-    limit_s = max(1.0, min(float(max_seconds), 120.0))
-    chunk_s = 0.1
-    frames = max(1, int(round(rate * chunk_s)))
-    max_chunks = max(1, int(round(limit_s / chunk_s)))
-    start_need = 3
-    stop_need = 9
-    min_speech_chunks = 4
-    preroll_n = 4
-    threshold = _vad_rms()
-    device = _input_device()
-    kwargs: dict[str, object] = {
-        "samplerate": rate,
-        "channels": 1,
-        "dtype": "float32",
-        "blocksize": frames,
-    }
-    if device is not None:
-        kwargs["device"] = device
-    if on_status is not None:
-        on_status("listening")
-    preroll: deque[np.ndarray] = deque(maxlen=preroll_n)
-    speech: list[np.ndarray] = []
-    loud_run = 0
-    quiet_run = 0
-    started = False
-    try:
-        with sd.InputStream(**kwargs) as stream:
-            for _ in range(max_chunks):
-                block, _overflowed = stream.read(frames)
-                mono = np.asarray(block, dtype=np.float32).reshape(-1)
-                if mono.size == 0:
-                    continue
-                rms = float(np.sqrt(np.mean(np.square(mono))))
-                if not started:
-                    preroll.append(mono)
-                    if rms >= threshold:
-                        loud_run += 1
-                    else:
-                        loud_run = 0
-                    if loud_run >= start_need:
-                        started = True
-                        speech.extend(preroll)
-                        quiet_run = 0
-                        if on_status is not None:
-                            on_status("speech")
-                    continue
-                speech.append(mono)
-                if rms < threshold:
-                    quiet_run += 1
-                else:
-                    quiet_run = 0
-                if len(speech) >= min_speech_chunks and quiet_run >= stop_need:
-                    break
-    except Exception as exc:
-        raise _capture_failure(exc) from exc
-    if not speech:
-        raise RuntimeError("no speech detected")
-    wave = np.concatenate(speech, axis=0).astype(np.float32)
-    return wave, rate
+
+class MicRecorder:
+    def __init__(
+        self,
+        *,
+        sample_rate: int = 16000,
+        max_seconds: float | None = None,
+        on_status: StatusFn | None = None,
+    ) -> None:
+        self._rate = max(8000, int(sample_rate))
+        self._max_seconds = (
+            record_max_seconds_default()
+            if max_seconds is None
+            else max(2.0, min(float(max_seconds), 300.0))
+        )
+        self._on_status = on_status
+        self._lock = threading.Lock()
+        self._chunks: list[np.ndarray] = []
+        self._stop = threading.Event()
+        self._cancel = threading.Event()
+        self._done = threading.Event()
+        self._finish_lock = threading.Lock()
+        self._finishing = False
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
+        self._wave: np.ndarray | None = None
+        self._peak_rms = 0.0
+        self._hit_max = False
+        self._started_at = 0.0
+        self._cancelled = False
+
+    @property
+    def active(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    @property
+    def finishing(self) -> bool:
+        return self._finishing
+
+    @property
+    def elapsed_s(self) -> float:
+        if self._started_at <= 0.0:
+            return 0.0
+        end = time.monotonic()
+        if self._done.is_set():
+            return min(self._max_seconds, max(0.0, end - self._started_at))
+        return max(0.0, time.monotonic() - self._started_at)
+
+    @property
+    def peak_rms(self) -> float:
+        return self._peak_rms
+
+    @property
+    def hit_max(self) -> bool:
+        return self._hit_max
+
+    @property
+    def max_seconds(self) -> float:
+        return self._max_seconds
+
+    def take_finish(self) -> bool:
+        with self._finish_lock:
+            if self._finishing:
+                return False
+            self._finishing = True
+            return True
+
+    def start(self) -> None:
+        if self.active:
+            raise RuntimeError("already recording")
+        self._stop.clear()
+        self._cancel.clear()
+        self._done.clear()
+        self._finishing = False
+        self._error = None
+        self._wave = None
+        self._peak_rms = 0.0
+        self._hit_max = False
+        self._cancelled = False
+        self._chunks = []
+        self._started_at = time.monotonic()
+        self._thread = threading.Thread(target=self._run, name="sophon-sst-mic", daemon=True)
+        self._thread.start()
+        self._emit("recording")
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self._cancel.set()
+        self._stop.set()
+
+    def join(self, timeout: float | None = 8.0) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout)
+        if thread.is_alive():
+            raise RuntimeError("microphone capture did not stop")
+
+    def result(self) -> tuple[np.ndarray, int, float]:
+        if self._error is not None:
+            raise self._error
+        if self._cancelled or self._cancel.is_set():
+            raise RuntimeError("recording cancelled")
+        wave = self._wave
+        if wave is None or wave.size == 0:
+            raise RuntimeError("no audio captured")
+        duration = wave.size / float(self._rate)
+        if duration < 0.12:
+            raise RuntimeError("no audio captured")
+        return wave, self._rate, float(self._peak_rms)
+
+    def _emit(self, phase: str) -> None:
+        cb = self._on_status
+        if cb is None:
+            return
+        try:
+            cb(phase)
+        except Exception:
+            pass
+
+    def _run(self) -> None:
+        try:
+            import sounddevice as sd
+        except ImportError as exc:
+            err = ImportError("sounddevice unavailable - install with: uv sync --extra sst")
+            err.__cause__ = exc
+            self._error = err
+            self._done.set()
+            return
+
+        frames = max(1, int(round(self._rate * 0.1)))
+        device = _input_device()
+        kwargs: dict[str, object] = {
+            "samplerate": self._rate,
+            "channels": 1,
+            "dtype": "float32",
+            "blocksize": frames,
+        }
+        if device is not None:
+            kwargs["device"] = device
+
+        def callback(indata, _frames, _time_info, _status) -> None:
+            if self._stop.is_set() or self._cancel.is_set():
+                raise sd.CallbackStop
+            mono = np.asarray(indata, dtype=np.float32).reshape(-1)
+            if mono.size == 0:
+                return
+            rms = float(np.sqrt(np.mean(np.square(mono))))
+            with self._lock:
+                self._chunks.append(np.copy(mono))
+                if rms > self._peak_rms:
+                    self._peak_rms = rms
+
+        try:
+            with sd.InputStream(callback=callback, **kwargs):
+                deadline = self._started_at + self._max_seconds
+                while not self._stop.is_set() and not self._cancel.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._hit_max = True
+                        self._stop.set()
+                        break
+                    self._stop.wait(timeout=min(0.1, remaining))
+        except Exception as exc:
+            callback_stop = getattr(sd, "CallbackStop", None)
+            if callback_stop is None or not isinstance(exc, callback_stop):
+                self._error = _capture_failure(exc)
+                self._done.set()
+                self._emit("stopped")
+                return
+
+        with self._lock:
+            chunks = list(self._chunks)
+        if chunks:
+            self._wave = np.concatenate(chunks, axis=0).astype(np.float32)
+        else:
+            self._wave = np.zeros((0,), dtype=np.float32)
+        self._done.set()
+        if self._cancel.is_set():
+            self._emit("cancelled")
+            return
+        if self._hit_max:
+            self._emit("max")
+            return
+        self._emit("stopped")
+
+
+# TODO(sst): optional Silero VAD auto-stop behind SOPHON_SST_VAD=1, off by default
+# TODO(sst): live input-device picker when SOPHON_SST_MIC is unset and capture fails

@@ -1,0 +1,14 @@
+preset: llama2_7b_chat
+output_name: qa-chain
+max_examples: 500
+load_in_4bit: true
+stages:
+  - id: gsm8k
+    dataset: gsm8k_instructions
+    num_train_epochs: 1
+  - id: hellaswag
+    dataset: hellaswag
+    learning_rate: 1.0e-4
+  - id: mmlu
+    dataset: mmlu
+    learning_rate: 5.0e-5

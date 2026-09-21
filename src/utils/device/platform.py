@@ -6,50 +6,101 @@ import subprocess
 import sys
 from pathlib import Path
 
-ORODRUIN_CONSOLE_STEMS = (
-    "orodruin-cli",
-    "orodruin-infer",
-    "orodruin-chat-cli",
-    "orodruin-chat-tui",
-    "orodruin-download-hf",
-    "orodruin-download-hf-debug",
-    "orodruin-hf-download",
-    "orodruin-system-check",
-    "orodruin-benchmark",
+DEFAULT_SOPHON_WINDOWS_ROOT = r"C:\Software\Python\NLP\Personal\sophon"
+
+SOPHON_CONSOLE_STEMS = (
+    "sophon-cli",
+    "sophon-infer",
+    "sophon-chat-cli",
+    "sophon-chat-tui",
+    "sophon-download-hf",
+    "sophon-download-hf-debug",
+    "sophon-hf-download",
+    "sophon-system-check",
+    "sophon-benchmark",
+    "sophon-rag-index",
+    "sophon-sync-shims",
+    "sophon-finetune",
 )
 
 _CHILD_ENV_KEYS = (
-    "ORODRUIN_TUI_LOG",
-    "ORODRUIN_TUI_CHILD",
-    "ORODRUIN_INTERFACE",
+    "SOPHON_TUI_LOG",
+    "SOPHON_TUI_CHILD",
+    "SOPHON_INTERFACE",
     "PYTHONPATH",
     "PYTHONUTF8",
     "PYTHONIOENCODING",
     "HF_TOKEN",
     "HUGGING_FACE_HUB_TOKEN",
-    "ORODRUIN_ENV_FILE",
-    "ORODRUIN_OBSIDIAN_TOOLS",
-    "ORODRUIN_OBSIDIAN_API_URL",
-    "ORODRUIN_OBSIDIAN_API_KEY",
+    "SOPHON_ENV_FILE",
+    "SOPHON_OBSIDIAN_TOOLS",
+    "SOPHON_OBSIDIAN_API_URL",
+    "SOPHON_OBSIDIAN_API_KEY",
     "OBSIDIAN_API_KEY",
     "OBSIDIAN_API_TOKEN",
-    "ORODRUIN_SHELL_TOOLS",
-    "ORODRUIN_SHELL_TIMEOUT_S",
-    "ORODRUIN_TTS_TOOL",
-    "ORODRUIN_TTS_BACKEND",
-    "ORODRUIN_TTS_SPEAKER",
-    "ORODRUIN_TTS_SPEED",
-    "ORODRUIN_SST",
-    "ORODRUIN_SST_TOOL",
-    "ORODRUIN_SST_BACKEND",
-    "ORODRUIN_SST_MODEL",
-    "ORODRUIN_SST_LANGUAGE",
-    "ORODRUIN_SST_DEVICE",
-    "ORODRUIN_SST_MAX_NEW_TOKENS",
-    "ORODRUIN_SST_LISTEN_S",
-    "ORODRUIN_SST_VAD_RMS",
-    "ORODRUIN_SST_MIC",
-    "ORODRUIN_LISTEN_SECONDS",
+    "SOPHON_SHELL_TOOLS",
+    "SOPHON_SHELL_TIMEOUT_S",
+    "SOPHON_EDITOR_TOOLS",
+    "SOPHON_MEMORY_DB",
+    "SOPHON_MEMORY_SESSION",
+    "SOPHON_MEMORY_USER",
+    "SOPHON_MEMORY_RECALL_TURNS",
+    "SOPHON_MEMORY_DIR",
+    "SOPHON_MEMORY_BUDGET_CHARS",
+    "SOPHON_MEMORY_TOOLS",
+    "SOPHON_SKILLS",
+    "SOPHON_SKILLS_DIRS",
+    "SOPHON_SKILLS_CATALOG_CHARS",
+    "SOPHON_SKILL_TOOLS",
+    "SOPHON_TTS_TOOL",
+    "SOPHON_TTS_BACKEND",
+    "SOPHON_TTS_SPEAKER",
+    "SOPHON_TTS_SPEED",
+    "SOPHON_SST",
+    "SOPHON_SST_TOOL",
+    "SOPHON_SST_BACKEND",
+    "SOPHON_SST_MODEL",
+    "SOPHON_SST_LANGUAGE",
+    "SOPHON_SST_DEVICE",
+    "SOPHON_SST_MAX_NEW_TOKENS",
+    "SOPHON_SST_MAX_S",
+    "SOPHON_SST_LISTEN_S",
+    "SOPHON_SST_VAD_RMS",
+    "SOPHON_SST_MIC",
+    "SOPHON_LISTEN_SECONDS",
+    "SOPHON_GOOGLE_CLIENT_SECRETS",
+    "SOPHON_GOOGLE_TOOLS",
+    "SOPHON_BOOKMARKS_PATH",
+    "SOPHON_GOOGLE_CSE_KEY",
+    "SOPHON_GOOGLE_CSE_CX",
+    "SOPHON_WEB_SEARCH_TOOLS",
+    "SOPHON_SEARXNG_URL",
+    "SOPHON_SEARXNG_ENGINES",
+    "SOPHON_SEARXNG_CATEGORIES",
+    "SOPHON_CHAT_BACKEND",
+    "SOPHON_OPENAI_API_KEY",
+    "OPENAI_API_KEY",
+    "SOPHON_OPENAI_BASE_URL",
+    "OPENAI_BASE_URL",
+    "SOPHON_OPENAI_TIMEOUT_S",
+    "SOPHON_ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "SOPHON_ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "SOPHON_ANTHROPIC_TIMEOUT_S",
+    "SOPHON_GEMINI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "SOPHON_GEMINI_BASE_URL",
+    "GEMINI_BASE_URL",
+    "SOPHON_GEMINI_TIMEOUT_S",
+    "SOPHON_OVERLEAF_TOOLS",
+    "SOPHON_OVERLEAF_GIT_TOKEN",
+    "OVERLEAF_GIT_TOKEN",
+    "SOPHON_OVERLEAF_PROJECT_ID",
+    "SOPHON_OVERLEAF_PROJECT_IDS",
+    "SOPHON_WINDOWS_ROOT",
+    "SOPHON_WINDOWS_CLI",
 )
 
 
@@ -106,13 +157,38 @@ def is_windows_pe_executable(path: Path) -> bool:
         return False
 
 
-def resolve_windows_console_script(stem: str, project_root: Path | None = None) -> Path | None:
-    if project_root is None:
-        from utils.device.env_bootstrap import orodruin_project_root
+def _windows_runtime_roots(project_root: Path | None = None) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
 
-        project_root = orodruin_project_root()
-    candidate = Path(project_root) / ".venv" / "Scripts" / f"{stem}.exe"
-    return candidate if is_windows_pe_executable(candidate) else None
+    def _add(path: Path | None) -> None:
+        if path is None:
+            return
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(path)
+
+    if project_root is not None:
+        _add(Path(project_root))
+    else:
+        try:
+            from utils.device.env_bootstrap import sophon_project_root
+
+            _add(sophon_project_root())
+        except Exception:
+            pass
+    _add(sophon_windows_root_linux())
+    return roots
+
+
+def resolve_windows_console_script(stem: str, project_root: Path | None = None) -> Path | None:
+    for root in _windows_runtime_roots(project_root):
+        candidate = root / ".venv" / "Scripts" / f"{stem}.exe"
+        if is_windows_pe_executable(candidate):
+            return candidate
+    return None
 
 
 def linux_path_to_windows(path: str | Path) -> str | None:
@@ -136,32 +212,132 @@ def linux_path_to_windows(path: str | Path) -> str | None:
     return out or None
 
 
-def wsl_windows_venv_message() -> str:
-    from utils.device.env_bootstrap import orodruin_project_root
+def _wsl_exe_wslpath_u(windows_path: str) -> str | None:
+    wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+    if not wsl:
+        return None
+    try:
+        proc = subprocess.run(
+            [wsl, "-e", "wslpath", "-u", windows_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    out = proc.stdout.strip().splitlines()
+    if not out:
+        return None
+    return out[-1].strip() or None
 
-    root = orodruin_project_root()
-    win_root = linux_path_to_windows(root) or str(root)
+
+def to_linux_display_path(path: str | Path) -> str:
+    raw = str(path)
+    if sys.platform == "win32":
+        converted = _wsl_exe_wslpath_u(raw)
+        return converted or raw
+    linux = windows_path_to_linux(path)
+    return linux or raw
+
+
+def windows_path_to_linux(path: str | Path) -> str | None:
+    raw = str(path).strip()
+    if not raw:
+        return None
+    if sys.platform == "win32":
+        return raw
+    if Path(raw).exists() and (raw.startswith("/") or raw.startswith("\\")):
+        return str(Path(raw))
+    if not is_wsl():
+        return None
+    wslpath = shutil.which("wslpath")
+    if not wslpath:
+        return None
+    try:
+        proc = subprocess.run(
+            [wslpath, "-u", raw],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    out = proc.stdout.strip()
+    return out or None
+
+
+def sophon_windows_root() -> str:
+    env = os.environ.get("SOPHON_WINDOWS_ROOT", "").strip()
+    if env:
+        return env.rstrip("\\/")
+    return DEFAULT_SOPHON_WINDOWS_ROOT
+
+
+def sophon_windows_root_linux() -> Path | None:
+    converted = windows_path_to_linux(sophon_windows_root())
+    return Path(converted) if converted else None
+
+
+def windows_userprofile_linux() -> Path | None:
+    if sys.platform == "win32":
+        raw = os.environ.get("USERPROFILE", "").strip()
+        return Path(raw) if raw else None
+    if not is_wsl():
+        return None
+    cmd = shutil.which("cmd.exe")
+    if not cmd:
+        return None
+    try:
+        proc = subprocess.run(
+            [cmd, "/c", "echo %USERPROFILE%"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd="/mnt/c/Windows",
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    win = proc.stdout.strip().splitlines()
+    if not win:
+        return None
+    linux = windows_path_to_linux(win[-1].strip())
+    return Path(linux) if linux else None
+
+
+def windows_local_appdata_linux() -> Path | None:
+    if sys.platform == "win32":
+        raw = os.environ.get("LOCALAPPDATA", "").strip()
+        return Path(raw) if raw else None
+    home = windows_userprofile_linux()
+    if home is None:
+        return None
+    local = home / "AppData" / "Local"
+    return local if local.is_dir() else None
+
+
+def store_pwsh_windows() -> str:
+    return r"%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe"
+
+
+def wsl_windows_venv_message() -> str:
+    win_root = sophon_windows_root()
     return "\n".join(
         [
-            "orodruin desktop TUI requires the Windows virtual environment (.venv/Scripts/orodruin-cli.exe).",
+            "sophon desktop TUI requires the Windows virtual environment on the deploy tree.",
             "",
-            "Close any running orodruin-chat-tui / Windows Terminal orodruin windows first.",
-            "If uv sync reports Access is denied, remove .venv from PowerShell (not WSL).",
+            "From WSL (copies this checkout to Windows, uv sync, Windows Terminal profile):",
+            "  sophon-cli deploy-windows",
             "",
-            "From PowerShell on Windows:",
+            "Or from Store PowerShell on Windows:",
             f"  cd {win_root}",
-            "  Remove-Item -Recurse -Force .venv",
-            "  $env:UV_LINK_MODE = 'copy'",
+            "  $env:UV_LINK_MODE = \"copy\"",
             "  uv sync --extra tui --extra finetune",
             "",
-            "Then from WSL or PowerShell:",
-            "  ./.venv/Scripts/orodruin-cli.exe chat --preset llama2_7b_chat",
-            "",
-            "From WSL (delegates to the Windows .exe when present):",
-            "  orodruin-cli chat --windows",
+            "Then from WSL:",
+            "  sophon-cli chat --windows",
             "",
             "Stay on WSL/Linux Python instead:",
-            "  orodruin-cli chat --linux",
+            "  sophon-cli chat --linux",
         ]
     )
 
@@ -192,7 +368,7 @@ def wsl_windows_cli_preference(*, windows: bool = False, linux: bool = False) ->
         return "linux"
     if windows:
         return "windows"
-    env = os.environ.get("ORODRUIN_WINDOWS_CLI", "").strip().lower()
+    env = os.environ.get("SOPHON_WINDOWS_CLI", "").strip().lower()
     if env in ("1", "true", "yes", "windows", "win"):
         return "windows"
     if env in ("0", "false", "no", "linux", "wsl"):
@@ -200,7 +376,7 @@ def wsl_windows_cli_preference(*, windows: bool = False, linux: bool = False) ->
     return "auto"
 
 
-def windows_console_script_available(stem: str = "orodruin-cli") -> bool:
+def windows_console_script_available(stem: str = "sophon-cli") -> bool:
     return resolve_windows_console_script(stem) is not None
 
 
@@ -263,13 +439,13 @@ def module_fallback_argv(module: str, args: list[str]) -> list[str]:
 
 def chat_tui_argv(args: list[str]) -> list[str]:
     if sys.platform == "win32":
-        win_script = resolve_windows_console_script("orodruin-chat-tui")
+        win_script = resolve_windows_console_script("sophon-chat-tui")
         if win_script is not None:
             return [str(win_script), *args]
-    script = resolve_installed_script("orodruin-chat-tui")
+    script = resolve_installed_script("sophon-chat-tui")
     if script is not None:
         return [str(script), *args]
-    return module_fallback_argv("orodruin.cli.backends.textual", args)
+    return module_fallback_argv("sophon.cli.backends.textual", args)
 
 
 def desktop_terminal_available() -> bool:
@@ -277,7 +453,7 @@ def desktop_terminal_available() -> bool:
         return True
     if sys.platform == "darwin":
         return True
-    if is_wsl() and resolve_windows_console_script("orodruin-cli") is not None:
+    if is_wsl() and resolve_windows_console_script("sophon-cli") is not None:
         return True
     return False
 
@@ -313,7 +489,7 @@ def ensure_venv_scripts_shims() -> list[Path]:
         return []
     created: list[Path] = []
     scripts_dir.mkdir(exist_ok=True)
-    for stem in ORODRUIN_CONSOLE_STEMS:
+    for stem in SOPHON_CONSOLE_STEMS:
         source = bin_dir / stem
         if not source.is_file():
             continue
@@ -333,8 +509,8 @@ def ensure_venv_scripts_shims() -> list[Path]:
 def sync_shims_main() -> None:
     created = ensure_venv_scripts_shims()
     if not created:
-        print("orodruin: Scripts shims already present (or bin/ entrypoints missing).", flush=True)
+        print("sophon: Scripts shims already present (or bin/ entrypoints missing).", flush=True)
         return
-    print("orodruin: created Scripts shims for cross-platform paths:", flush=True)
+    print("sophon: created Scripts shims for cross-platform paths:", flush=True)
     for path in created:
         print(f"  {path}", flush=True)

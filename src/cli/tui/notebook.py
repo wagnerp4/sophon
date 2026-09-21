@@ -21,6 +21,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # TODO: kernel execution (jupyter_client) for live Run Cell
 # TODO: widget / html / latex outputs
 # TODO: collapse long outputs / cell folding
+# TODO: notebook image outputs via sixel/kitty (same path as editor raster)
 
 
 @dataclass

@@ -99,13 +99,24 @@ def verify_model_known(
 
 
 def _text_from_ollama_message(msg: object) -> str:
+    content = _content_from_ollama_message(msg)
+    if content:
+        return content
+    thinking = _thinking_from_ollama_message(msg)
+    if thinking:
+        return thinking
+    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+        return ""
+    return ""
+
+
+def _content_from_ollama_message(msg: object) -> str:
     if not isinstance(msg, dict):
         return ""
     content = msg.get("content")
     if isinstance(content, str):
-        if content.strip():
-            return content
-    elif isinstance(content, list):
+        return content.strip()
+    if isinstance(content, list):
         parts: list[str] = []
         for block in content:
             if isinstance(block, dict):
@@ -114,13 +125,17 @@ def _text_from_ollama_message(msg: object) -> str:
                     parts.append(t)
             elif isinstance(block, str):
                 parts.append(block)
-        joined = "".join(parts).strip()
-        if joined:
-            return joined
+        return "".join(parts).strip()
+    return ""
+
+
+def _thinking_from_ollama_message(msg: object) -> str:
+    if not isinstance(msg, dict):
+        return ""
     thinking = msg.get("thinking")
     if isinstance(thinking, str) and thinking.strip():
         return thinking.strip()
-    return "" if isinstance(content, str) else ""
+    return ""
 
 
 def chat_complete(
@@ -131,6 +146,26 @@ def chat_complete(
     base_url: str | None = None,
     timeout_s: float | None = None,
 ) -> str:
+    return chat_complete_result(
+        model,
+        messages,
+        max_new_tokens=max_new_tokens,
+        base_url=base_url,
+        timeout_s=timeout_s,
+    ).text
+
+
+def chat_complete_result(
+    model: str,
+    messages: list[dict[str, object]],
+    *,
+    max_new_tokens: int,
+    base_url: str | None = None,
+    timeout_s: float | None = None,
+    tools: list | None = None,
+):
+    from backend.openai_compat import ChatCompletionResult, ToolCall, _parse_tool_calls
+
     base = base_url or ollama_base_url()
     url = f"{base}/api/chat"
     body_obj: dict[str, object] = {
@@ -139,6 +174,8 @@ def chat_complete(
         "stream": False,
         "options": {"num_predict": max_new_tokens},
     }
+    if tools:
+        body_obj["tools"] = tools
     body = json.dumps(body_obj).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -166,9 +203,68 @@ def chat_complete(
             "Increase OLLAMA_CHAT_TIMEOUT_S if cloud models need longer."
         ) from exc
     msg = data.get("message") or {}
-    text = _text_from_ollama_message(msg)
-    if text == "" and isinstance(msg, dict):
-        if msg.get("tool_calls") or msg.get("role"):
+    text = _content_from_ollama_message(msg)
+    reasoning = _thinking_from_ollama_message(msg)
+    tool_calls = _parse_ollama_tool_calls(msg, ToolCall, _parse_tool_calls)
+    if not text and reasoning and not tool_calls:
+        text = reasoning
+    if text == "" and isinstance(msg, dict) and not tool_calls:
+        if msg.get("role"):
             raise RuntimeError(f"Ollama returned no assistant text: {data!r}")
         raise RuntimeError(f"Unexpected Ollama response shape: {data!r}")
-    return text
+    prompt_tokens = _optional_int(data.get("prompt_eval_count"))
+    completion_tokens = _optional_int(data.get("eval_count"))
+    finish = "tool_calls" if tool_calls else "stop"
+    return ChatCompletionResult(
+        text=text,
+        tool_calls=tool_calls,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        finish_reason=finish,
+        reasoning=reasoning or None,
+    )
+
+
+def _parse_ollama_tool_calls(msg: object, tool_call_cls, parse_openai) -> list:
+    if not isinstance(msg, dict):
+        return []
+    parsed = list(parse_openai(msg) or [])
+    if parsed:
+        return parsed
+    raw = msg.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    out: list = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function") if isinstance(item.get("function"), dict) else item
+        name = str(fn.get("name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        args_raw = fn.get("arguments", item.get("arguments"))
+        args = args_raw if isinstance(args_raw, dict) else {}
+        if isinstance(args_raw, str) and args_raw.strip():
+            try:
+                loaded = json.loads(args_raw)
+                if isinstance(loaded, dict):
+                    args = loaded
+            except json.JSONDecodeError:
+                args = {"text": args_raw}
+        out.append(
+            tool_call_cls(
+                id=str(item.get("id") or f"ollama_{index}_{name}"),
+                name=name,
+                arguments=args,
+            )
+        )
+    return out
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None

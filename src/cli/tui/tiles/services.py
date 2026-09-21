@@ -47,9 +47,9 @@ def _probe_lmstudio() -> dict[str, Any]:
 
 
 def _probe_tts() -> dict[str, Any]:
-    backend = os.environ.get("ORODRUIN_TTS_BACKEND", "pipecat").strip() or "pipecat"
-    speaker = os.environ.get("ORODRUIN_TTS_SPEAKER", "").strip() or "-"
-    tool = os.environ.get("ORODRUIN_TTS_TOOL", "1").strip()
+    backend = os.environ.get("SOPHON_TTS_BACKEND", "pipecat").strip() or "pipecat"
+    speaker = os.environ.get("SOPHON_TTS_SPEAKER", "").strip() or "-"
+    tool = os.environ.get("SOPHON_TTS_TOOL", "1").strip()
     tool_on = tool.lower() not in ("", "0", "false", "no", "off")
     detail = f"backend={backend} speaker={speaker} tool={'on' if tool_on else 'off'}"
     ok = True
@@ -97,10 +97,42 @@ def _probe_obsidian() -> dict[str, Any]:
         }
 
 
+def _probe_zotero() -> dict[str, Any]:
+    from integrations.zotero.client import ZoteroClient, zotero_api_url
+
+    try:
+        ping = ZoteroClient().ping()
+        backend = str(ping.get("backend") or "")
+        url = str(ping.get("url") or zotero_api_url())
+        if ping.get("ok"):
+            return {
+                "name": "zotero",
+                "ok": True,
+                "detail": backend,
+                "models": [],
+                "url": url,
+            }
+        return {
+            "name": "zotero",
+            "ok": False,
+            "detail": str(ping.get("error") or "down"),
+            "models": [],
+            "url": url,
+        }
+    except Exception as exc:
+        return {
+            "name": "zotero",
+            "ok": False,
+            "detail": str(exc),
+            "models": [],
+            "url": zotero_api_url(),
+        }
+
+
 def _probe_sst() -> dict[str, Any]:
-    backend = os.environ.get("ORODRUIN_SST_BACKEND", "hf_qwen").strip() or "hf_qwen"
-    model = os.environ.get("ORODRUIN_SST_MODEL", "").strip() or "Qwen/Qwen3-ASR-0.6B"
-    tool = os.environ.get("ORODRUIN_SST_TOOL", "1").strip()
+    backend = os.environ.get("SOPHON_SST_BACKEND", "hf_qwen").strip() or "hf_qwen"
+    model = os.environ.get("SOPHON_SST_MODEL", "").strip() or "Qwen/Qwen3-ASR-0.6B"
+    tool = os.environ.get("SOPHON_SST_TOOL", "1").strip()
     tool_on = tool.lower() not in ("", "0", "false", "no", "off")
     detail = f"backend={backend} model={model} tool={'on' if tool_on else 'off'}"
     ok = True
@@ -124,8 +156,9 @@ def _fetch_services() -> TileState:
         _probe_tts(),
         _probe_sst(),
         _probe_obsidian(),
+        _probe_zotero(),
     ]
-    chat_backend = os.environ.get("ORODRUIN_CHAT_BACKEND", "auto").strip() or "auto"
+    chat_backend = os.environ.get("SOPHON_CHAT_BACKEND", "auto").strip() or "auto"
     lines = ["services", f"chat_backend={chat_backend}"]
     for row in probes:
         mark = "ok" if row.get("ok") else "down"

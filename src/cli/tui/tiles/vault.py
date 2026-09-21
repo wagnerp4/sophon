@@ -9,7 +9,7 @@ from cli.tui.tiles.base import BaseTile, TileState, wrap_fetch
 
 
 def _limit() -> int:
-    raw = os.environ.get("ORODRUIN_VAULT_LIMIT", "8").strip()
+    raw = os.environ.get("SOPHON_VAULT_LIMIT", "8").strip()
     try:
         return max(1, min(int(raw or "8"), 30))
     except ValueError:
@@ -20,7 +20,7 @@ def _daily_candidates() -> list[str]:
     today = date.today()
     iso = today.isoformat()
     compact = today.strftime("%Y%m%d")
-    custom = os.environ.get("ORODRUIN_VAULT_DAILY_PATH", "").strip()
+    custom = os.environ.get("SOPHON_VAULT_DAILY_PATH", "").strip()
     candidates = []
     if custom:
         candidates.append(custom)
@@ -47,7 +47,7 @@ def _fetch_vault() -> TileState:
     )
 
     if not obsidian_tools_enabled() and not obsidian_api_key():
-        raise ValueError("set ORODRUIN_OBSIDIAN_TOOLS=1 and ORODRUIN_OBSIDIAN_API_KEY for vault tile")
+        raise ValueError("set SOPHON_OBSIDIAN_TOOLS=1 and SOPHON_OBSIDIAN_API_KEY for vault tile")
     client = ObsidianClient(timeout_s=8.0)
     ping = client.ping()
     authenticated = bool(ping.get("authenticated")) if isinstance(ping, dict) else False

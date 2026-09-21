@@ -114,11 +114,10 @@ SHELL_EXEC_TOOL: dict[str, Any] = {
 }
 
 SHELL_TOOL_SYSTEM_HINT = (
-    "You can navigate the local filesystem and run shell commands with shell_pwd, "
-    "shell_cd, shell_ls, shell_read, and shell_exec. You are running inside the user's "
-    "local orodruin chat session with real disk access. "
-    "Do not claim you are a remote cloud service without filesystem access. "
+    "You can navigate the workspace with shell_pwd, shell_cd, shell_ls, shell_read, and shell_exec. "
+    "shell_exec runs in the project workspace and needs user approval unless the command prefix is allow-listed. "
     "Prefer shell_ls/shell_read over shell_exec for browsing files. "
+    "Do not write source files with the shell. Use editor_propose_edit. "
     "On Windows, use PowerShell command syntax."
 )
 

@@ -13,12 +13,12 @@ _MAX_OUTPUT_CHARS = 12_000
 
 
 def shell_tools_enabled() -> bool:
-    raw = os.environ.get("ORODRUIN_SHELL_TOOLS", "0").strip().lower()
+    raw = os.environ.get("SOPHON_SHELL_TOOLS", "0").strip().lower()
     return raw not in ("", "0", "false", "no", "off")
 
 
 def shell_timeout_s() -> float:
-    raw = os.environ.get("ORODRUIN_SHELL_TIMEOUT_S", "").strip()
+    raw = os.environ.get("SOPHON_SHELL_TIMEOUT_S", "").strip()
     if not raw:
         return _DEFAULT_TIMEOUT_S
     try:

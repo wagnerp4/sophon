@@ -34,6 +34,8 @@ class GenerationResult:
     gen_time_s: float
     stop_reason: str
     raw_response: str
+    reasoning: str | None = None
+    plan: str | None = None
 
 
 @dataclass
@@ -56,7 +58,7 @@ def _device_map_targets_mps(expanded_device_map: dict) -> bool:
     return False
 
 
-def _caching_allocator_warmup_orodruin(model: object, expanded_device_map: dict, hf_quantizer: object) -> None:
+def _caching_allocator_warmup_sophon(model: object, expanded_device_map: dict, hf_quantizer: object) -> None:
     if _device_map_targets_mps(expanded_device_map):
         return
     _orig_caching_allocator_warmup(model, expanded_device_map, hf_quantizer)
@@ -66,7 +68,7 @@ def install_mps_allocator_warmup_shim() -> None:
     global _mps_warmup_patch_installed
     if _mps_warmup_patch_installed:
         return
-    modeling_utils.caching_allocator_warmup = _caching_allocator_warmup_orodruin
+    modeling_utils.caching_allocator_warmup = _caching_allocator_warmup_sophon
     _mps_warmup_patch_installed = True
 
 
@@ -148,7 +150,7 @@ def _require_gemma4_unified_support(model_type: str | None) -> None:
         return
     raise ValueError(
         "gemma4_unified requires transformers>=5.10.1. "
-        "From the orodruin repo run: uv sync"
+        "From the sophon repo run: uv sync"
     )
 
 
@@ -176,6 +178,7 @@ def _apply_chat_inputs(
     *,
     enable_thinking: bool,
     add_generation_prompt: bool,
+    tools: list | None = None,
 ) -> dict[str, torch.Tensor]:
     template_kwargs: dict[str, object] = {
         "conversation": messages,
@@ -184,10 +187,16 @@ def _apply_chat_inputs(
         "return_tensors": "pt",
         "add_generation_prompt": add_generation_prompt,
     }
+    if tools:
+        template_kwargs["tools"] = tools
     try:
         inputs = processor.apply_chat_template(**template_kwargs, enable_thinking=enable_thinking)
     except TypeError:
-        inputs = processor.apply_chat_template(**template_kwargs)
+        template_kwargs.pop("tools", None)
+        try:
+            inputs = processor.apply_chat_template(**template_kwargs, enable_thinking=enable_thinking)
+        except TypeError:
+            inputs = processor.apply_chat_template(**template_kwargs)
     if isinstance(inputs, dict):
         return inputs
     input_ids = getattr(inputs, "get", lambda _k, _d=None: None)("input_ids")
@@ -296,7 +305,7 @@ def _log_load(
     if cb is not None:
         cb(0, 0, description)
         return
-    print(f"orodruin: {description}", file=sys.stderr, flush=True)
+    print(f"sophon: {description}", file=sys.stderr, flush=True)
 
 
 def load_processor_and_model(
@@ -470,6 +479,7 @@ def generate_response(
     extra_specials: list[str] | None = None,
     eos_token_ids: list[int] | None = None,
     model_type: str | None = None,
+    tools: list | None = None,
 ) -> GenerationResult:
     resolved_model_type = model_type or getattr(getattr(model, "config", None), "model_type", None)
     if _model_uses_chat_template_inputs(resolved_model_type):
@@ -479,23 +489,33 @@ def generate_response(
                 messages,
                 enable_thinking=enable_thinking,
                 add_generation_prompt=True,
+                tools=tools,
             ),
             model,
         )
     else:
+        template_kwargs: dict[str, object] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        if tools:
+            template_kwargs["tools"] = tools
         try:
             text = processor.apply_chat_template(
                 messages,
-                tokenize=False,
-                add_generation_prompt=True,
                 enable_thinking=enable_thinking,
+                **template_kwargs,
             )
         except TypeError:
-            text = processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+            template_kwargs.pop("tools", None)
+            try:
+                text = processor.apply_chat_template(
+                    messages,
+                    enable_thinking=enable_thinking,
+                    **template_kwargs,
+                )
+            except TypeError:
+                text = processor.apply_chat_template(messages, **template_kwargs)
         inputs = processor(text=text, return_tensors="pt").to(model.device)
     input_len = int(inputs["input_ids"].shape[-1])
 
@@ -551,6 +571,10 @@ def generate_response(
     last_tok = int(new_token_ids[-1].item()) if new_tokens > 0 else -1
     stop_reason = "eos" if (eos_ids and last_tok in eos_ids) else "max_new_tokens"
 
+    reasoning, plan = _parsed_side_channels(parsed)
+    if reasoning is None:
+        reasoning = _reasoning_from_raw_response(raw_response)
+
     if strip:
         display = parsed_to_display_text(parsed)
         cleaned = strip_special_tokens(display, extra_specials=extra_specials)
@@ -563,7 +587,38 @@ def generate_response(
         gen_time_s=gen_time_s,
         stop_reason=stop_reason,
         raw_response=raw_response,
+        reasoning=reasoning,
+        plan=plan,
     )
+
+
+def _parsed_side_channels(parsed: object) -> tuple[str | None, str | None]:
+    if not isinstance(parsed, dict):
+        return None, None
+    reasoning = None
+    for key in ("thinking", "reasoning", "reasoning_content", "thought"):
+        val = parsed.get(key)
+        if isinstance(val, str) and val.strip():
+            reasoning = val.strip()
+            break
+    plan = None
+    for key in ("plan", "planning"):
+        val = parsed.get(key)
+        if isinstance(val, str) and val.strip():
+            plan = val.strip()
+            break
+        if isinstance(val, list):
+            parts = [str(item).strip() for item in val if str(item).strip()]
+            if parts:
+                plan = "\n".join(f"{i}. {item}" for i, item in enumerate(parts, 1))
+                break
+    return reasoning, plan
+
+
+def _reasoning_from_raw_response(raw_response: str) -> str | None:
+    # TODO: parse Gemma/Qwen think/channel tags from raw_response when parsed is a plain string.
+    _ = raw_response
+    return None
 
 
 def parsed_to_display_text(parsed: object) -> str:
@@ -576,5 +631,59 @@ def parsed_to_display_text(parsed: object) -> str:
                 return str(inner)
         return str(parsed)
     return str(parsed)
+
+
+def hf_chat_complete(
+    processor: AutoProcessor,
+    model: nn.Module,
+    messages: list[dict[str, object]],
+    *,
+    max_new_tokens: int,
+    enable_thinking: bool,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    repetition_penalty: float | None = None,
+    seed: int | None = None,
+    extra_specials: list[str] | None = None,
+    eos_token_ids: list[int] | None = None,
+    model_type: str | None = None,
+    tools: list | None = None,
+):
+    from backend.hf.tool_parse import parse_generated_tool_calls, strip_tool_call_text
+    from backend.openai_compat import ChatCompletionResult
+
+    result = generate_response(
+        processor,
+        model,
+        messages,
+        max_new_tokens,
+        enable_thinking,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=repetition_penalty,
+        seed=seed,
+        strip=False,
+        extra_specials=extra_specials,
+        eos_token_ids=eos_token_ids,
+        model_type=model_type,
+        tools=tools,
+    )
+    calls = parse_generated_tool_calls(result.raw_response, result.parsed)
+    text = parsed_to_display_text(result.parsed)
+    if calls:
+        text = strip_tool_call_text(text)
+    else:
+        text = strip_special_tokens(text, extra_specials=extra_specials)
+    finish = "tool_calls" if calls else result.stop_reason
+    return ChatCompletionResult(
+        text=text,
+        tool_calls=calls,
+        prompt_tokens=result.input_tokens,
+        completion_tokens=result.new_tokens,
+        finish_reason=finish,
+        reasoning=result.reasoning,
+    )
 
 

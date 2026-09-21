@@ -1,0 +1,3 @@
+ssl4sed_root: /home/philipp/software/python/SSL4SED
+wsl_distro: Debian
+default_ssl4sed_target: ""

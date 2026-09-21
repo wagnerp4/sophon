@@ -15,19 +15,19 @@ _MAX_BODY_CHARS = 12_000
 
 
 def obsidian_tools_enabled() -> bool:
-    raw = os.environ.get("ORODRUIN_OBSIDIAN_TOOLS", "0").strip().lower()
+    raw = os.environ.get("SOPHON_OBSIDIAN_TOOLS", "0").strip().lower()
     return raw not in ("", "0", "false", "no", "off")
 
 
 def obsidian_api_url() -> str:
-    raw = os.environ.get("ORODRUIN_OBSIDIAN_API_URL", "").strip()
+    raw = os.environ.get("SOPHON_OBSIDIAN_API_URL", "").strip()
     if raw:
         return raw.rstrip("/")
     return _DEFAULT_URL
 
 
 def obsidian_api_key() -> str | None:
-    for key in ("ORODRUIN_OBSIDIAN_API_KEY", "OBSIDIAN_API_KEY", "OBSIDIAN_API_TOKEN"):
+    for key in ("SOPHON_OBSIDIAN_API_KEY", "OBSIDIAN_API_KEY", "OBSIDIAN_API_TOKEN"):
         raw = os.environ.get(key, "").strip()
         if raw:
             return raw
@@ -44,7 +44,7 @@ def _ssl_context(url: str) -> ssl.SSLContext | None:
 
 
 def _auth_headers() -> dict[str, str]:
-    headers = {"User-Agent": "orodruin-obsidian/0.1", "Accept": "*/*"}
+    headers = {"User-Agent": "sophon-obsidian/0.1", "Accept": "*/*"}
     key = obsidian_api_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"

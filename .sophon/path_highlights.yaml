@@ -1,0 +1,20 @@
+# Background chips for `path` / `url` spans in assistant replies.
+# Unknown paths use default. Add roots or segments over time.
+
+default: "#e5e5e5"
+roots:
+  vault: "#7c3aed"
+  obsidian: "#7c3aed"
+  youtube: "#dc2626"
+  drive: "#3b82f6"
+  overleaf: "#16a34a"
+  zotero: "#cc3300"
+  project: "#e5e5e5"
+  disk: "#e5e5e5"
+  bookmarks: "#e5e5e5"
+segments:
+  Personal: vault
+  KB: vault
+  Repos: vault
+  Storage: vault
+  Templates: vault
