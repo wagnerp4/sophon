@@ -14,6 +14,25 @@ from cli.tui.paste_drop import extract_dropped_paths, mention_roots, suggest_at_
 _NAV_CAPTURED_KEYS = frozenset({"ctrl+d", "ctrl+e", "ctrl+g", "ctrl+h"})
 
 
+def sync_prompt_nav(prompt: object, binds: object | None = None) -> None:
+    from cli.tui.keybinds import nav_chord_keys
+
+    bindings = getattr(prompt, "_bindings", None)
+    keymap = getattr(bindings, "key_to_bindings", None)
+    if not isinstance(keymap, dict):
+        return
+    original = getattr(prompt, "_nav_original_map", None)
+    if not isinstance(original, dict):
+        original = {key: list(items) for key, items in keymap.items()}
+        setattr(prompt, "_nav_original_map", original)
+    captured = nav_chord_keys(binds) if binds is not None else nav_chord_keys()
+    keymap.clear()
+    for key, items in original.items():
+        if str(key).lower() in captured:
+            continue
+        keymap[key] = list(items)
+
+
 def _input_bindings_without_nav() -> list[Binding]:
     out: list[Binding] = []
     for bind in Input.BINDINGS:

@@ -5,7 +5,13 @@ Product constraints and intended architecture: [VISION.md](VISION.md), [directio
 - Harness
     - Name: sophon
     - DONE: policy yaml, allow-list, 1/2/3 prompt for shell_exec and out-of-workspace writes
+    - DONE(docs): differences vs production CLIs (`direction/harness-comparison.md`)
+    - TODO: `/energy local|api` + spend ledger (`direction/energy.md`)
+    - TODO: `/compact` auto-on (`direction/compact.md`)
+    - TODO: MCP host + NexusTools origins (`integrations/mcp/README.md`)
     - TODO: OS sandbox, net allowlist, ResearchAgent clone, plan-mode schema filter
+    - Plan: `direction/next-energy-mcp-compact.md`
+    - NEXT: stdio MCP + one scrape server (`direction/next-mcp-stdio-scrape.md`)
 - Skills
     - Name: Lembas
 - Agents = Model + Harness
@@ -18,10 +24,14 @@ Product constraints and intended architecture: [VISION.md](VISION.md), [directio
     - TODO: settlement notice, list/interrupt, continuable + send_message
     - TODO: leftover-VRAM 2B/4B classify and JEV Choice. Deferred while inherit is the only legal combo
     - TODO: worktrees for parallel code
-    - Not this plan: loop engineering, unlimited tool-loop policy, swarm / STATE.md overlay
+    - Not this plan: unlimited tool-loop policy, swarm overlay (after solve-until-done)
 - Models
     - More Model Options: DeepSeek API for Flash 4.1
 - Loop = Agents + Schedule + Context + State Control
+    - NEXT: solve-until-done `/loop` + STATE.md evidence gates (`direction/next-solve-until-done.md`)
+    - Umbrella next direction: `direction/next-mcp-retrieval-loop.md`
+- RAG
+    - NEXT: corpus `.ignore` + tagging (`direction/next-retrieval-ignore-tags.md`)
 - Panes
     - Dashboard
     - Chat
@@ -46,6 +56,7 @@ Product constraints and intended architecture: [VISION.md](VISION.md), [directio
             - LightRAG (structure)
             - Adaptive-RAG (retrieve or skip)
             - Build: `sophon-rag-index` / `/rag-index`
+            - NEXT: `.ignore` + tagging (`direction/next-retrieval-ignore-tags.md`)
         - Eval (in Chat)
             - `/eval model` (MMLU / Hellaswag)
             - `/eval rag` (ablation vs default index)
@@ -65,8 +76,11 @@ Product constraints and intended architecture: [VISION.md](VISION.md), [directio
             - better chat feedback for each reasoning / tool / planning step
             - finetune on past conversation to see error patterns in similar task context (how?)
         - MCP
-            - Obsidian MCP
-            - Zotero MCP
+            - Spec: `docs/integrations/mcp/README.md` (model-only, NexusTools keep slash)
+            - TODO: MCP host, `.sophon/mcp.yaml`, HUD counts
+            - NEXT: stdio + scrape server (`direction/next-mcp-stdio-scrape.md`)
+            - TODO: Obsidian MCP (drop native `vault_*` from model schema when live)
+            - TODO: Zotero MCP
             - DONE: chat zotero_* tools (tree / search / list / read / metrics)
             - DONE: chat overleaf_* tools (list projects / list / read / sections)
             - TODO: Crossref live citation counts, semantic search
@@ -109,6 +123,10 @@ Product constraints and intended architecture: [VISION.md](VISION.md), [directio
 
 Open TODOS:
     - Web-site builder skill/command (like lovable)
+    - PyPI + uv tool install sophon as the public CLI download
+    - Fat --onedir Windows/Linux binaries (torch size). Tracked in TERMINAL.md
+    - Linux .desktop / kitty profile install (native spawn already probes kitty/wezterm/gnome-terminal)
+    - Omarchy AUR package
 
 
 

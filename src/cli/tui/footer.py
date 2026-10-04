@@ -6,8 +6,6 @@ from textual.widgets import Footer, Label
 
 from cli.tui.speech import SpeakButton
 
-_PANES_LABEL = "^d/^e/^g Panes"
-
 
 class FooterCopy(Label):
     DEFAULT_CSS = """
@@ -76,9 +74,18 @@ class NexusFooter(Footer):
         super().__init__(*args, **kwargs)
 
     def compose(self) -> ComposeResult:
+        from cli.tui.keybinds import panes_footer_label
+
         yield from super().compose()
         with Horizontal(id="footer-right"):
             if self._chat_actions:
                 yield FooterCopy()
                 yield SpeakButton("chat-speak")
-            yield Label(_PANES_LABEL, classes="-panes")
+            yield Label(panes_footer_label(), classes="-panes")
+
+    def set_panes_label(self, text: str) -> None:
+        try:
+            label = self.query_one("Label.-panes", Label)
+        except Exception:
+            return
+        label.update(text)

@@ -1,6 +1,8 @@
 # Google (Gmail, Drive, bookmarks, Custom Search)
 
-sophon can connect Google accounts for Gmail search and Drive browsing, load a local Chrome bookmark export, and run Google Custom Search.
+sophon can connect Google accounts for Gmail search and Drive browsing, load a local Chrome bookmark export, and run Google Custom Search as one `web_search` backend.
+
+`web_search` also has no-key verticals (`source=`). See [../search/README.md](../search/README.md).
 
 | Surface | How |
 |--------|-----|
@@ -50,7 +52,7 @@ uv sync --extra tui
 
 ## Chat
 
-With LM Studio and tools enabled, check `/tools`. Ask for mail, Drive folders, bookmarks, or a web query. The model should call the google_* / web_search tools when they are listed.
+With LM Studio and tools enabled, check `/tools`. Ask for mail, Drive folders, bookmarks, or a web query. Pass `web_search` `source` (`auto` for SearXNG then CSE, or a named vertical). The model should call the google_* / web_search tools when they are listed. `web_search` is not a browser.
 
 ## Limits
 

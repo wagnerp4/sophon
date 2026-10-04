@@ -1,0 +1,16 @@
+---
+description: Rsync sophon WSL source to the Windows deploy tree after code changes.
+alwaysApply: true
+---
+
+# Windows deploy after sophon edits
+
+This checkout is the WSL source tree. The chat TUI the user types `/search` into runs from `C:\Software\Python\NLP\Personal\sophon`.
+
+After source changes, from this repo:
+
+```bash
+./scripts/deploy-windows.sh --skip-venv
+```
+
+Use `--sync-venv` when dependencies or `pyproject.toml` extras change. Restart the Windows **sophon** profile. The live process does not pick up new slash commands.

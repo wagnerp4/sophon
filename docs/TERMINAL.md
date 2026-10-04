@@ -36,14 +36,15 @@ Long-term host constraints (any OS, no CSI hang on Windows): [VISION.md](VISION.
 
 Use `--chat-first` to keep the old chat-first startup behavior.
 
-If Windows Terminal reports profile settings errors (`0x80070002` / file not found), the profile still points at a missing `.exe`. From the WSL checkout:
+If Windows Terminal reports profile settings errors (`0x80070002` / file not found), the profile still points at a missing `.exe`. If it reports `0x8007010b` / `Could not access starting directory`, the deploy folder itself is gone. From the WSL checkout:
 
 ```bash
-sophon-cli deploy-windows
+sophon-cli deploy-windows --sync-venv
 ```
 
-That rewrites the **sophon** profile to Store PowerShell (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`) running `scripts\start-sophon-chat.ps1 -Foreground` on `C:\Software\Python\NLP\Personal\sophon`. Profile only:
+That recreates `C:\Software\Python\NLP\Personal\sophon` if needed, then rewrites the **sophon** profile to Store PowerShell (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`) running `scripts\start-sophon-chat.ps1 -Foreground`. Profile only (folder must already exist):
 
 ```bash
 sophon-cli tui-profiles install
+sophon-cli deploy-windows --profile-only
 ```

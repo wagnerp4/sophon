@@ -23,11 +23,12 @@ The dashboard is the idle and ops surface: host health, markets, news, services,
 
 ## Future direction
 
-1. Occupancy line, then swarm tile: resident model VRAM, leftover, queued children, API in-flight, last placement refuse reason. Data from the subagent registry / later `one/` state, not from scraping the TUI. Spec: [subagents.md](subagents.md).
-2. Services tile already probes Ollama, LM Studio, TTS, Obsidian, Zotero. Extend with harness policy summary (tools on/off).
-3. Storage tile: keep volume bars. Optional `SOPHON_SYSTEM_FILETYPE_ROOTS`. Do not index `models/` on every refresh.
-4. News/papers stay RSS + HN + arXiv + HF trending. Crossref live citation counts are Chat/Zotero work, not a dashboard requirement.
-5. Skins tile remains optional (`SOPHON_SKINS_*` in setup notes).
+1. Occupancy line, then swarm tile: resident model VRAM, leftover, queued children, API in-flight, last placement refuse reason. Data from the subagent registry / later `one/` state, not from scraping the TUI. Spec: [subagents.md](subagents.md). Energy HUD: regime + today's USD vs daily cap ([energy.md](energy.md)).
+2. Chat status already prints `Skills · Tools · MCP`. MCP is 0 until the host ships. Intended breakdown: NexusTools + MCP + Injected ([../integrations/mcp/README.md](../integrations/mcp/README.md)).
+3. Services tile already probes Ollama, LM Studio, TTS, Obsidian, Zotero. Extend with harness policy summary (tools on/off).
+4. Storage tile: keep volume bars. Optional `SOPHON_SYSTEM_FILETYPE_ROOTS`. Do not index `models/` on every refresh.
+5. News/papers stay RSS + HN + arXiv + HF trending. Crossref live citation counts are Chat/Zotero work, not a dashboard requirement.
+6. Skins tile remains optional (`SOPHON_SKINS_*` in setup notes).
 
 ## Non-goals
 

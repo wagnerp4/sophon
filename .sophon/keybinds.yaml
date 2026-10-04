@@ -1,8 +1,10 @@
 # sophon keybinds (project profile)
-# Restart is not required if you save this file from the editor.
+# Restart is not required if you save this file from the editor or /keybind set.
 # Textual key names: ctrl+s, ctrl+shift+o, right, f2
 # Empty quotes unbind an action.
 # slash: maps a key to /command (name without the slash).
+# TODO: quit, help, focus_prompt, focus_transcript, accept_edits, decline_edits,
+# energy_local, energy_api, compact_now, tools, and search have no handler yet.
 
 save_file: ctrl+s
 save_as: ctrl+shift+s
@@ -19,6 +21,24 @@ accept_completion: right
 copy_chat: ctrl+y
 listen: ctrl+l
 open_models: ctrl+m
+open_dashboard: ctrl+d
+open_editor: ctrl+e
+open_chat: ctrl+g
+cycle_mode: ctrl+h
+permission_once: "1"
+permission_persist: "2"
+permission_deny: "3"
+quit: ""
+help: ""
+focus_prompt: ""
+focus_transcript: ""
+accept_edits: ""
+decline_edits: ""
+energy_local: ""
+energy_api: ""
+compact_now: ""
+tools: ""
+search: ""
 slash:
   models: ctrl+shift+m
   permissions: f2

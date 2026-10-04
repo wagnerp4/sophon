@@ -127,10 +127,11 @@ def accept_pending_edits(state: object) -> str:
     errors = apply_changeset_to_disk(changeset, direction="after")
     notify_assist_ui(state)
     root = _workspace(state)
+    cards = _review_card_lines(changeset, root, "Accepted")
     body = "accepted:\n" + changeset.summary(root)
     if errors:
-        return body + "\nwrite errors:\n" + "\n".join(errors)
-    return body
+        return cards + "\n" + body + "\nwrite errors:\n" + "\n".join(errors)
+    return cards + "\n" + body
 
 
 def decline_pending_edits(state: object) -> str:
@@ -149,10 +150,11 @@ def undo_accepted_edits(state: object) -> str:
         return "nothing to undo"
     errors = apply_changeset_to_disk(changeset, direction="before")
     notify_assist_ui(state)
+    cards = _review_card_lines(changeset, _workspace(state), "Undid")
     body = "undid:\n" + changeset.summary(_workspace(state))
     if errors:
-        return body + "\nwrite errors:\n" + "\n".join(errors)
-    return body
+        return cards + "\n" + body + "\nwrite errors:\n" + "\n".join(errors)
+    return cards + "\n" + body
 
 
 def redo_accepted_edits(state: object) -> str:
@@ -162,10 +164,23 @@ def redo_accepted_edits(state: object) -> str:
         return "nothing to redo"
     errors = apply_changeset_to_disk(changeset, direction="after")
     notify_assist_ui(state)
+    cards = _review_card_lines(changeset, _workspace(state), "Redid")
     body = "redid:\n" + changeset.summary(_workspace(state))
     if errors:
-        return body + "\nwrite errors:\n" + "\n".join(errors)
-    return body
+        return cards + "\n" + body + "\nwrite errors:\n" + "\n".join(errors)
+    return cards + "\n" + body
+
+
+def _review_card_lines(changeset: object, root: object, verb: str) -> str:
+    from cli.dev_cards import format_review_line, line_delta
+
+    lines: list[str] = []
+    edits = changeset.file_list()
+    for edit in edits:
+        added, removed = line_delta(edit.before, edit.after)
+        label = display_path(edit.path, root)
+        lines.append(format_review_line(verb, label, added, removed))
+    return "\n".join(lines)
 
 
 def _workspace(state: object):

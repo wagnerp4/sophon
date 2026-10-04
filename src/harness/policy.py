@@ -15,6 +15,7 @@ MODES = ("plan", "chat", "agent")
 class Policy:
     workspace: str = "."
     mode: str = "agent"
+    sandbox: str = "full"
     allow: list[str] = field(default_factory=list)
     ask: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
@@ -77,7 +78,8 @@ def merge_policy(base: Policy, overlay: Policy, *, replace_lists: bool = False) 
         deny = _unique(list(base.deny) + list(overlay.deny))
     mode = overlay.mode if overlay.mode in MODES else base.mode
     workspace = overlay.workspace if overlay.workspace else base.workspace
-    return Policy(workspace=workspace, mode=mode, allow=allow, ask=ask, deny=deny)
+    sandbox = overlay.sandbox if overlay.sandbox else base.sandbox
+    return Policy(workspace=workspace, mode=mode, sandbox=sandbox, allow=allow, ask=ask, deny=deny)
 
 
 def policy_from_mapping(data: dict[str, Any] | None) -> Policy:
@@ -88,10 +90,14 @@ def policy_from_mapping(data: dict[str, Any] | None) -> Policy:
     mode = str(payload.get("mode") or "agent").strip().lower()
     if mode not in MODES:
         mode = "agent"
+    from integrations.shell.sandbox import normalize_sandbox
+
+    sandbox = normalize_sandbox(payload.get("sandbox")) if "sandbox" in payload else ""
     workspace = str(payload.get("workspace") or ".").strip() or "."
     return Policy(
         workspace=workspace,
         mode=mode,
+        sandbox=sandbox,
         allow=_string_list(perms.get("allow")),
         ask=_string_list(perms.get("ask")),
         deny=_string_list(perms.get("deny")),
@@ -102,6 +108,7 @@ def policy_to_mapping(policy: Policy) -> dict[str, Any]:
     return {
         "workspace": policy.workspace,
         "mode": policy.mode,
+        "sandbox": policy.sandbox,
         "permissions": {
             "allow": list(policy.allow),
             "ask": list(policy.ask),

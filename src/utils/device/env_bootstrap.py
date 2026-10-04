@@ -212,3 +212,32 @@ def merge_dotenv_keys(
         body += "\n"
     dest.write_text(body, encoding="utf-8")
     return changed
+
+
+def upsert_dotenv_key(key: str, value: str, path: Path | None = None) -> Path:
+    target = path or DOTENV_LOAD_PATH
+    if target is None:
+        target = sophon_project_root() / ".env"
+    text = target.read_text(encoding="utf-8-sig") if target.is_file() else ""
+    lines = text.splitlines()
+    stored = value.replace("\n", "").replace("\r", "")
+    found = False
+    for index, line in enumerate(lines):
+        work = line.strip()
+        if not work or work.startswith("#") or "=" not in work:
+            continue
+        if work.partition("=")[0].strip() == key:
+            lines[index] = f"{key}={stored}"
+            found = True
+            break
+    if not found:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"{key}={stored}")
+    body = "\n".join(lines)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    os.environ[key] = stored
+    return target

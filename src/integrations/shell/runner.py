@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import base64
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,14 +80,67 @@ class ShellSession:
         if cd is not None:
             return cd
         timeout = shell_timeout_s() if timeout_s is None else max(1.0, float(timeout_s))
+        mode = str(getattr(self, "sandbox_mode", "full") or "full")
+        if mode in ("read-only", "workspace-write"):
+            return self._run_sandboxed(command, timeout_s=timeout, mode=mode)
         if sys.platform == "win32":
             return self._run_windows(command, timeout_s=timeout)
         return self._run_unix(command, timeout_s=timeout)
 
+    def _run_sandboxed(self, command: str, *, timeout_s: float, mode: str) -> ShellResult:
+        from integrations.shell.sandbox import (
+            confined_preexec,
+            landlock_supported,
+            linux_confined_argv,
+            popen_captured,
+            windows_confined_argv,
+        )
+
+        workspace = Path(getattr(self, "sandbox_workspace", self.cwd) or self.cwd)
+        if sys.platform == "win32":
+            argv = windows_confined_argv(command, workspace=workspace, cwd=self.cwd, mode=mode)
+            if isinstance(argv, str):
+                return ShellResult(exit_code=1, output=argv, cwd=self.cwd)
+            code, output = popen_captured(argv, cwd=self.cwd, timeout_s=timeout_s, job=True)
+            return ShellResult(exit_code=code, output=truncate_output(output), cwd=self.cwd)
+        if landlock_supported():
+            shell = os.environ.get("SHELL") or shutil.which("bash") or "/bin/sh"
+            try:
+                proc = subprocess.run(
+                    [shell, "-lc", command],
+                    cwd=str(self.cwd),
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    capture_output=True,
+                    check=False,
+                    timeout=timeout_s,
+                    preexec_fn=confined_preexec(workspace, mode),
+                )
+            except subprocess.TimeoutExpired:
+                return ShellResult(
+                    exit_code=124,
+                    output=truncate_output(f"error: command timed out after {timeout_s:.0f}s"),
+                    cwd=self.cwd,
+                )
+            except Exception as exc:
+                return ShellResult(exit_code=1, output=truncate_output(f"error: {exc}"), cwd=self.cwd)
+            output = (proc.stdout or "") + (proc.stderr or "")
+            text = output.rstrip() if output.strip() else f"(exit {proc.returncode})"
+            return ShellResult(exit_code=int(proc.returncode), output=truncate_output(text), cwd=self.cwd)
+        argv = linux_confined_argv(command, workspace=workspace, cwd=self.cwd, mode=mode)
+        if isinstance(argv, str):
+            return ShellResult(exit_code=1, output=argv, cwd=self.cwd)
+        if argv and argv[0] == "__landlock__":
+            return ShellResult(exit_code=1, output="error: sandbox unavailable", cwd=self.cwd)
+        code, output = popen_captured(argv, cwd=self.cwd, timeout_s=timeout_s, job=False)
+        return ShellResult(exit_code=code, output=truncate_output(output), cwd=self.cwd)
+
     def _run_windows(self, command: str, *, timeout_s: float) -> ShellResult:
-        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        shell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
         if shell:
-            argv = [shell, "-NoLogo", "-NoProfile", "-Command", command]
+            encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+            argv = [shell, "-NoLogo", "-NoProfile", "-EncodedCommand", encoded]
         else:
             argv = ["cmd.exe", "/c", command]
         try:
@@ -109,9 +163,12 @@ class ShellSession:
         except Exception as exc:
             return ShellResult(exit_code=1, output=truncate_output(f"error: {exc}"), cwd=self.cwd)
         output = (proc.stdout or "") + (proc.stderr or "")
+        text = output.rstrip() if output.strip() else f"(exit {proc.returncode})"
+        if not text.startswith("exit "):
+            text = f"exit {proc.returncode}\n{text}"
         return ShellResult(
             exit_code=int(proc.returncode),
-            output=truncate_output(output.rstrip() if output.strip() else f"(exit {proc.returncode})"),
+            output=truncate_output(text),
             cwd=self.cwd,
         )
 
@@ -122,6 +179,8 @@ class ShellSession:
         except Exception as exc:
             return ShellResult(exit_code=1, output=truncate_output(f"error: {exc}"), cwd=self.cwd)
         text = output.rstrip() if output.strip() else f"(exit {code})"
+        if not text.startswith("exit "):
+            text = f"exit {code}\n{text}"
         return ShellResult(exit_code=int(code), output=truncate_output(text), cwd=self.cwd)
 
     def _run_pty(self, argv: list[str], *, timeout_s: float) -> tuple[int, str]:

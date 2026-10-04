@@ -19,6 +19,7 @@ class HeartbeatStep:
     path: str | None = None
     ok: bool = True
     latency_s: float = 0.0
+    detail: str = ""
 
 
 HEARTBEAT_KIND_ICONS: dict[str, str] = {
@@ -91,6 +92,8 @@ def heartbeat_thinking_title(
 
 
 def format_heartbeat_step_plain(step: HeartbeatStep) -> str:
+    if (step.detail or "").strip():
+        return step.detail.strip()
     mark = "ok" if step.ok else "fail"
     extra = step.preview or step.path or ""
     latency = f" {step.latency_s:.2f}s" if step.latency_s > 0 else ""

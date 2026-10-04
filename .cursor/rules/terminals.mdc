@@ -1,0 +1,13 @@
+---
+description: Named terminals for the WSL sophon tree and the Windows TUI
+alwaysApply: true
+---
+
+# Sophon terminals
+
+| Profile | Opens |
+| --- | --- |
+| `sophon-wsl` | This checkout in WSL (Debian) |
+| `sophon` / `sophon-windows` | Windows TUI at `C:\Software\Python\NLP\Personal\sophon` |
+
+Windows Terminal: new tab, dropdown. Cursor: terminal dropdown. Test `/help` and other slash commands on the Windows profile. Restart that tab after `./scripts/deploy-windows.sh --skip-venv`.

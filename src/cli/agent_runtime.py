@@ -112,16 +112,23 @@ def tool_calls_openai_payload(tool_calls: list) -> list[dict[str, object]]:
 
 
 def complete_chat_turn(state: object, messages: list[dict[str, object]], tools: list[dict] | None):
+    from backend.energy.gate import guard_completion, record_completion
+    from backend.openai_compat import ChatCompletionResult
+
     backend_id = getattr(state, "backend_id", "hf")
     params = getattr(state, "params", None)
     max_new_tokens = int(getattr(params, "max_new_tokens", 512) or 512)
     temperature = float(getattr(params, "temperature", 0.7) or 0.7)
     top_p = float(getattr(params, "top_p", 1.0) or 1.0)
+    purpose = str(getattr(state, "_energy_purpose", "chat") or "chat")
+    blocked = guard_completion(state, max_new_tokens, purpose=purpose)
+    if blocked:
+        return ChatCompletionResult(text=blocked, finish_reason="energy")
     if backend_id == "hf":
         from backend.hf.backend import hf_chat_complete
 
         meta = getattr(state, "meta", None)
-        return hf_chat_complete(
+        result = hf_chat_complete(
             getattr(state, "processor", None),
             getattr(state, "model", None),
             messages,
@@ -136,17 +143,20 @@ def complete_chat_turn(state: object, messages: list[dict[str, object]], tools: 
             eos_token_ids=(getattr(meta, "eos_token_ids", None) or None) if meta is not None else None,
             tools=tools,
         )
-    from backend.chat_resolve import server_chat_complete
+    else:
+        from backend.chat_resolve import server_chat_complete
 
-    return server_chat_complete(
-        backend_id,
-        model=str(getattr(state, "server_model", None) or ""),
-        messages=messages_for_server(messages),
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        tools=tools,
-    )
+        result = server_chat_complete(
+            backend_id,
+            model=str(getattr(state, "server_model", None) or ""),
+            messages=messages_for_server(messages),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            tools=tools,
+        )
+    record_completion(state, result, purpose=purpose)
+    return result
 
 
 @dataclass

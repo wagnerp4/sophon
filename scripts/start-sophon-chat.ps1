@@ -9,13 +9,29 @@ if (-not $Preset -or $Preset.Trim() -eq "") {
     $Preset = "llama2_7b_chat"
 }
 
+$DefaultRoot = "C:\Software\Python\NLP\Personal\sophon"
 $Root = Split-Path -Parent $PSScriptRoot
 if (-not (Test-Path -LiteralPath $Root)) {
     if ($env:SOPHON_WINDOWS_ROOT -and (Test-Path -LiteralPath $env:SOPHON_WINDOWS_ROOT)) {
         $Root = $env:SOPHON_WINDOWS_ROOT
     } else {
-        $Root = "C:\Software\Python\NLP\Personal\sophon"
+        $Root = $DefaultRoot
     }
+}
+
+if (-not (Test-Path -LiteralPath $Root)) {
+    Write-Error @"
+sophon deploy root is missing: $Root
+
+Windows Terminal 0x8007010b means startingDirectory no longer exists.
+From the WSL checkout, recreate the tree and rewrite the profile:
+
+  sophon-cli deploy-windows --sync-venv
+
+Or set SOPHON_WINDOWS_ROOT to an existing Windows checkout, then:
+
+  sophon-cli deploy-windows --profile-only
+"@
 }
 
 $Cli = Join-Path $Root ".venv\Scripts\sophon-cli.exe"

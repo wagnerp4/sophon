@@ -509,6 +509,9 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         self._load_keybinds()
         apply_keybinds(self, KeybindSet(actions=self._keybinds, slash=self._slash_binds))
         self._reload_chat_screen_keybinds()
+        from cli.tui.keybinds import refresh_keybind_surfaces
+
+        refresh_keybind_surfaces(self.app, KeybindSet(actions=self._keybinds, slash=self._slash_binds))
 
     def _reload_chat_screen_keybinds(self) -> None:
         stack = getattr(self.app, "screen_stack", None)
@@ -1371,6 +1374,12 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         if self.sst_recording() and not line.strip().lower().startswith("/listen"):
             self._cancel_sst_mic()
         self._sync_assist_context()
+        from cli.key_prompt import take_pending_secret
+
+        secret_note = take_pending_secret(state, line)
+        if secret_note is not None:
+            self.append_chat_system(secret_note)
+            return
         send_line = line
         dropped = list(self._dropped_paths)
         if dropped and paths_still_in_text(line, dropped) and not line.strip().startswith("/") and line.strip() != "!":

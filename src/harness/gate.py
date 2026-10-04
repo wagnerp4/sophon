@@ -31,10 +31,10 @@ from harness.policy import (
 )
 
 GATED_TOOLS = frozenset(
-    {"shell_exec", "editor_propose_edit", "memory_propose", "subagent", "subagent_fork"}
+    {"shell_exec", "editor_propose_edit", "memory_propose", "subagent", "subagent_fork", "github_create"}
 )
 PLAN_LIKE_MODES = frozenset({"plan", "chat"})
-# TODO: OS-level sandbox (workspace-write) once Windows Store PowerShell has a supported boundary.
+# TODO: net allow-list is separate from the filesystem sandbox.
 
 _CIRCUIT_PATTERNS = (
     re.compile(r"\brm\b[^;&\n]*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+[/~](?:\s|$)", re.IGNORECASE),
@@ -67,6 +67,12 @@ class Harness:
             return self.mode_override
         return self.policy.mode if self.policy.mode in ("plan", "chat", "agent") else "agent"
 
+    @property
+    def sandbox(self) -> str:
+        from integrations.shell.sandbox import normalize_sandbox
+
+        return normalize_sandbox(getattr(self.policy, "sandbox", "full"))
+
     def set_mode(self, mode: str) -> str:
         token = str(mode or "").strip().lower()
         if token not in ("plan", "chat", "agent"):
@@ -96,6 +102,7 @@ class Harness:
         shared, local = policy_file_paths(self.project_root)
         lines = [
             f"mode: {self.mode}",
+            f"sandbox: {self.sandbox}",
             f"workspace: {workspace}",
             f"policy: {shared} ({'yes' if shared.is_file() else 'missing'})",
             f"local: {local} ({'yes' if local.is_file() else 'missing'})",
@@ -182,6 +189,9 @@ class Harness:
         if tool == "shell_exec":
             request.reason = "shell_exec"
             return AuthResult.ask(request, reason="shell_exec")
+        if tool == "github_create":
+            request.reason = "github_create"
+            return AuthResult.ask(request, reason="github_create")
         if tool in ("editor_propose_edit", "memory_propose", "shell_cd"):
             if not path_in_workspace(target, workspace):
                 request.reason = "outside workspace"

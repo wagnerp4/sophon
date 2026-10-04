@@ -383,7 +383,7 @@ Slash help: new `subagents` section next to `tools`.
 
 Named so the next spec has a hook. Do not implement here.
 
-- **Loop engineering** — cron / `/loop`, maker then checker, evidence, L1–L3 autonomy. Foundry `with-outerloop` and the vault [Loop/About](obsidian://open?vault=Obsidian%20Notes&file=KB%2FIndex%2FFormal%20Sciences%2FComputer%20Science%2FSoftware%20Engineering%2FAI%2FAgentic%2FLoop%2FAbout.md) page. Needs this spawn seam first.
+- **Loop engineering** — cron / `/loop`, maker then checker, evidence, L1–L3 autonomy. Plan: [next-solve-until-done.md](next-solve-until-done.md). Foundry `with-outerloop` and the vault [Loop/About](obsidian://open?vault=Obsidian%20Notes&file=KB%2FIndex%2FFormal%20Sciences%2FComputer%20Science%2FSoftware%20Engineering%2FAI%2FAgentic%2FLoop%2FAbout.md) page. Needs this spawn seam first.
 - **Infinite tool calling** — `/tool-rounds unlimited` already exists for one session. Multi-child loops need per-child caps, stop hooks that look at artifacts (not self-grade), and cancellation that walks the tree.
 - **Multi-agent orchestration** — `STATE.md`, fan-in synthesizer, swarm overlay, headless `sophon-cli swarm`. That is [orchestrator.md](orchestrator.md). Subagents are the primitive it will call.
 

@@ -83,6 +83,7 @@ def run_store_pwsh(command: str, *, windows_cwd: str) -> int:
     cmd = shutil.which("cmd.exe")
     if cmd is None:
         raise RuntimeError("cmd.exe is not on PATH. Cannot invoke Store PowerShell from WSL.")
+    script = f"$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath '{windows_cwd.replace(chr(39), chr(39)+chr(39))}'; {command}; if ($LASTEXITCODE -ne $null) {{ exit $LASTEXITCODE }}"
     line = subprocess.list2cmdline(
         [
             "pwsh.exe",
@@ -91,20 +92,51 @@ def run_store_pwsh(command: str, *, windows_cwd: str) -> int:
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            command,
+            script,
         ]
     )
-    return subprocess.call([cmd, "/c", line], cwd="/mnt/c/Windows")
+    proc = subprocess.run(
+        [cmd, "/c", line],
+        cwd="/mnt/c/Windows",
+        capture_output=True,
+        text=True,
+    )
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+        if not proc.stdout.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+        if not proc.stderr.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+    return proc.returncode
+
+
+def _windows_uv_command() -> str:
+    cmd = shutil.which("cmd.exe")
+    if cmd is None:
+        return "uv"
+    proc = subprocess.run(
+        [cmd, "/c", "where uv.exe"],
+        cwd="/mnt/c/Windows",
+        capture_output=True,
+        text=True,
+    )
+    for line in (proc.stdout or "").splitlines():
+        token = line.strip().strip('"')
+        if token.lower().endswith("uv.exe") and "windowsapps" not in token.lower():
+            return token
+    return "uv"
 
 
 def sync_windows_venv(*, extras: tuple[str, ...] = ("tui", "finetune")) -> int:
-    # TODO: add tts/sst extras when the Windows TUI session needs those backends
     extra_flags = " ".join(f"--extra {name}" for name in extras)
-    root = windows_runtime_root().replace("'", "''")
+    uv = _windows_uv_command().replace("'", "''")
     command = (
-        f"Set-Location -LiteralPath '{root}'; "
         "[System.Environment]::SetEnvironmentVariable('UV_LINK_MODE','copy','Process'); "
-        f"uv sync {extra_flags}"
+        f"& '{uv}' sync {extra_flags}"
     )
     return run_store_pwsh(command, windows_cwd=windows_runtime_root())
 
@@ -163,6 +195,24 @@ def deploy_windows(
             messages.append("Windows .venv sync finished.")
     elif exe is not None:
         messages.append(f"Windows TUI exe present: {exe}")
+
+    cli_exe = dest / ".venv" / "Scripts" / "sophon-cli.exe"
+    dest_ok = dest.is_dir()
+    cli_ok = cli_exe.is_file()
+    messages.append(
+        f"Verify: deploy root exists={dest_ok} ({win_root}); "
+        f"sophon-cli.exe exists={cli_ok} ({cli_exe})."
+    )
+    if not dest_ok:
+        messages.append(
+            "Windows Terminal 0x8007010b means startingDirectory is missing. "
+            "Re-run sophon-cli deploy-windows --sync-venv from WSL after the copy."
+        )
+    elif not cli_ok:
+        messages.append(
+            "Profile startingDirectory exists but sophon-cli.exe is missing. "
+            "Re-run sophon-cli deploy-windows --sync-venv."
+        )
 
     return messages
 

@@ -112,7 +112,7 @@ class ObsidianClient:
         rel = path.strip().lstrip("/")
         if rel and not rel.endswith("/"):
             rel = rel + "/"
-        api_path = f"/vault/{rel}" if rel else "/vault/"
+        api_path = "/vault/" + urllib.parse.quote(rel, safe="/") if rel else "/vault/"
         data = _request("GET", api_path, timeout_s=self.timeout_s, expect_json=True)
         if isinstance(data, dict):
             files = data.get("files")
@@ -120,7 +120,7 @@ class ObsidianClient:
                 return [str(x) for x in files]
         return []
 
-    def get_file(self, path: str) -> str:
+    def get_file(self, path: str, *, limit: int | None = _MAX_BODY_CHARS) -> str:
         rel = path.strip().lstrip("/")
         if not rel:
             raise ValueError("empty vault path")
@@ -131,7 +131,22 @@ class ObsidianClient:
             expect_json=False,
         )
         text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=2)
-        return _truncate(text)
+        if limit is None:
+            return text
+        return _truncate(text, limit)
+
+    def put_file(self, path: str, content: str) -> None:
+        rel = path.strip().lstrip("/")
+        if not rel:
+            raise ValueError("empty vault path")
+        _request(
+            "PUT",
+            f"/vault/{urllib.parse.quote(rel, safe='/')}",
+            body=content.encode("utf-8"),
+            content_type="text/markdown",
+            timeout_s=self.timeout_s,
+            expect_json=False,
+        )
 
     def search_simple(self, query: str) -> Any:
         q = query.strip()

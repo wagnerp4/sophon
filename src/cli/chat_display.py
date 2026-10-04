@@ -345,8 +345,10 @@ def _tools_status_bits() -> str:
 def _inventory_line(state: _SessionState) -> str:
     from cli.chat import harness_inventory_counts
 
-    n_skills, n_tools, n_mcp = harness_inventory_counts(state)
-    return f" Skills: {n_skills} · Tools: {n_tools} · MCP: {n_mcp}"
+    n_skills, n_tools, n_mcp, n_injected = harness_inventory_counts(state)
+    return (
+        f" Skills: {n_skills} · NexusTools: {n_tools} · MCP: {n_mcp} · Injected: {n_injected}"
+    )
 
 
 def _harness_mode_name(state: _SessionState) -> str:
@@ -419,10 +421,14 @@ def chat_session_header_lines(
     if runtime:
         add(runtime)
     mode = _harness_mode_name(state)
-    mode_plain = f"mode {mode}"
+    from backend.energy.ledger import sum_today
+    from backend.energy.regime import ensure_energy, status_line
+
+    energy = status_line(ensure_energy(state), spent_today=sum_today(ensure_energy(state)))
+    mode_plain = f"mode {mode} · {energy}"
     mode_color = _MODE_COLORS.get(mode, _BLUE_DIM)
     mode_markup = (
-        f"[dim]mode [/][bold {mode_color}]{_escape_markup(mode)}[/]"
+        f"[dim]mode [/][bold {mode_color}]{_escape_markup(mode)}[/] [dim]{_escape_markup(energy)}[/]"
         if for_markup
         else None
     )

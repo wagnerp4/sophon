@@ -19,7 +19,7 @@
 
 ---
 
-Long-term direction (harness, editor, dashboard, swarms, self-evolution): [docs/VISION.md](docs/VISION.md).
+Long-term direction (harness, editor, dashboard, swarms, self-evolution): [docs/VISION.md](docs/VISION.md). Public stub: [wagnerp4.github.io/sophon](https://wagnerp4.github.io/sophon/).
 
 ## Requirements
 
@@ -75,12 +75,51 @@ cd C:\Software\Python\NLP\Personal\sophon
 
 Optional Unsloth backend: add `--extra finetune-unsloth` to `uv sync`.
 
+### Omarchy / Arch (single tree)
+
+On a Linux host with no Windows deploy tree, keep one checkout. Do not set `SOPHON_WINDOWS_ROOT`.
+
+```bash
+uv sync --extra tui --extra finetune
+cp .env.example .env
+sophon-cli chat --no-spawn-window --preset llama2_7b_chat
+```
+
+Headless / SSH:
+
+```bash
+sophon-cli chat --interface repl --preset llama2_7b_chat
+```
+
+Optional: open the same command in kitty or wezterm. Native desktop spawn tries those terminals when they are on PATH. If none are present, use `--no-spawn-window`.
+
+LM Studio / Ollama on localhost work the same as on WSL. GPU Hugging Face weights need a CUDA-capable `uv` venv on this machine. Do not `uv sync` a Windows PE venv into this tree.
+
 ### WSL-only (no Windows TUI)
 
 ```bash
 uv sync --extra tui --extra finetune
 sophon-cli chat --linux --preset llama2_7b_chat
 ```
+
+### Troubleshooting: Windows Terminal 0x8007010b
+
+`error 2147942667 (0x8007010b) ... Could not access starting directory "C:\Software\Python\NLP\Personal\sophon"` means the Windows Terminal **sophon** profile still points at a folder that was deleted. The Textual app is not the failure. Recreate the deploy tree from WSL:
+
+```bash
+cd "/home/philipp/software/python/Signal Processing/NLP/Personal/sophon"
+uv sync --extra tui --extra finetune
+./scripts/deploy-windows.sh --sync-venv
+```
+
+Then open the **sophon** profile, or:
+
+```powershell
+cd C:\Software\Python\NLP\Personal\sophon
+.\scripts\start-sophon-chat.ps1 -Foreground
+```
+
+If the folder exists but the profile is stale: `./scripts/deploy-windows.sh --profile-only`.
 
 ---
 

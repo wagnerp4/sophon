@@ -24,3 +24,4 @@ data/exps/
 .sophon/memory/scratch/
 .sophon/memory/MEMORY-STATE.md
 .sophon/harness.local.yaml
+.sophon/energy.local.yaml

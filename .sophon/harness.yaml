@@ -1,5 +1,6 @@
 workspace: .
 mode: agent
+sandbox: full
 permissions:
   allow: []
   ask: []

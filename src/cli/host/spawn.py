@@ -140,6 +140,37 @@ def _spawn_macos(command: list[str], env: dict[str, str], cwd: str) -> subproces
     return subprocess.Popen(["osascript", "-e", script], env=env, cwd=cwd)
 
 
+def _spawn_native_linux(
+    command: list[str],
+    env: dict[str, str],
+    cwd: str,
+    *,
+    window_title: str,
+) -> subprocess.Popen[bytes] | None:
+    kitty = shutil.which("kitty")
+    if kitty:
+        return subprocess.Popen(
+            [kitty, "--title", window_title, "--directory", cwd, "--", *command],
+            env=env,
+            cwd=cwd,
+        )
+    wezterm = shutil.which("wezterm")
+    if wezterm:
+        return subprocess.Popen(
+            [wezterm, "start", "--cwd", cwd, "--", *command],
+            env=env,
+            cwd=cwd,
+        )
+    gnome = shutil.which("gnome-terminal")
+    if gnome:
+        return subprocess.Popen(
+            [gnome, f"--working-directory={cwd}", f"--title={window_title}", "--", *command],
+            env=env,
+            cwd=cwd,
+        )
+    return None
+
+
 def _spawn_linux(
     command: list[str],
     env: dict[str, str],
@@ -169,10 +200,13 @@ def _spawn_linux(
                 env=env,
                 cwd="/mnt/c/Windows",
             )
+    native = _spawn_native_linux(command, env, cwd, window_title=window_title)
+    if native is not None:
+        return native
     raise RuntimeError(
-        "Linux desktop TUI spawn needs Windows Terminal from WSL. "
-        "Run sophon-cli deploy-windows, then sophon-cli chat --windows, "
-        "or use --no-spawn-window."
+        "No desktop terminal found (kitty, wezterm, or gnome-terminal). "
+        "Run sophon-cli chat --no-spawn-window in this TTY. "
+        "On WSL, sophon-cli deploy-windows then sophon-cli chat --windows."
     )
 
 

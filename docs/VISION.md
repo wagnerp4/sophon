@@ -34,8 +34,9 @@ The stated product bar is: the terminal is enough to control engineering work on
 
 ### Local-first, explicit network
 
-- Default inference is local (Ollama / LM Studio / HF weights on disk).
-- Cloud APIs (DeepSeek and others on the backlog) are optional backends with keys in `.env`, never in promoted skills.
+- Default inference is local (Ollama / LM Studio / HF weights on disk). `/energy local` is that regime.
+- Cloud APIs (OpenAI, Anthropic, Google, DeepSeek on the backlog) are `/energy api` with keys in `.env`, never in promoted skills. Spend caps: [direction/energy.md](direction/energy.md).
+- Claude Code / Codex CLIs are not an API backend.
 - RAG and memory stay on disk unless a storage backend is explicitly configured.
 
 ### One venv owner per tree
@@ -45,7 +46,7 @@ The stated product bar is: the terminal is enough to control engineering work on
 
 ### Tools are gated and reviewable
 
-- Destructive or ambient tools stay behind `SOPHON_*_TOOLS` (and related) env flags.
+- Destructive or ambient tools stay behind `SOPHON_*_TOOLS` (and related) env flags. MCP servers use the same harness table ([integrations/mcp/README.md](integrations/mcp/README.md)).
 - Editor tools queue a changeset. Accept / decline / undo / redo is the write path.
 - Swarm workers inherit a **subset** of the interactive tool set. Unattended shell and mail send are off until policy says otherwise.
 

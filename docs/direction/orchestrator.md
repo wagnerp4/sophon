@@ -31,7 +31,7 @@ Loop = Agents + Schedule + Context + State Control
 ## Constraints
 
 - **One interactive GPU job.** Local HF / LM Studio / Ollama on this desktop is one resident weight file. Extra children either share those weights (serialized turns), occupy leftover VRAM if the placement solver admits a 2B–4B classify combo, or wait. They do not load a second 12B. Arithmetic and the solver: [subagents.md](subagents.md).
-- **Two energy regimes.** Local: VRAM and the 3090 compute stream. API (OpenAI / Anthropic / Google): inherit the parent model by default. Token RPM/TPM and dollars are the cap. Energy is not a local constraint.
+- **Two energy regimes.** Local: VRAM and the 3090 compute stream. API (OpenAI / Anthropic / Google, later DeepSeek): inherit the parent model by default. Token RPM/TPM and dollars are the cap. Energy is not a local constraint. Session swap and spend ledger: [energy.md](energy.md).
 - **No fork bomb.** Max workers, max queue, max wall time in `.sophon/` or env (`SOPHON_SWARM_*` / `SOPHON_SUBAGENT_*` to be named when implemented). Depth starts at 1.
 - **Isolation.** Workers get a workdir and an allowlist. They do not share the interactive editor buffer. Results return as proposed diffs or reports. Parallel writers use worktrees. That isolates git, not VRAM.
 - **Approval boundary.** Merge to git, send mail, Overleaf write: human in the TUI. ResearchAgent never crosses that line. Background children cannot answer 1/2/3 prompts. They fail closed and tell the parent.
@@ -48,7 +48,7 @@ Loop = Agents + Schedule + Context + State Control
 5. Initialization/training/download jobs stay **jobs**, not chat turns (Hub download already has a progress path).
 6. Cloud/server control (AWS, B2) is storage/compute for jobs, not a second orchestrator. Credentials in `.env`.
 7. Cross-OS: scheduler records OS-neutral job ids. Paths in state files are stored as the runtime root (`SOPHON_WINDOWS_ROOT` vs WSL) explicitly.
-8. After spawn works: loop engineering (maker/checker, evidence), then unbounded tool-loop policy, then this swarm overlay.
+8. After spawn works: loop engineering (maker/checker, evidence) — plan [next-solve-until-done.md](next-solve-until-done.md). Then unbounded tool-loop policy, then this swarm overlay.
 
 ## Non-goals
 

@@ -96,7 +96,8 @@ SHELL_EXEC_TOOL: dict[str, Any] = {
         "name": SHELL_EXEC,
         "description": (
             "Run a shell command in the current working directory. "
-            "On Windows use PowerShell syntax. On Unix use the user shell. "
+            "On Windows the command is PowerShell and is passed encoded so quotes survive. "
+            "Do not use this to create GitHub repositories. Use github_create. "
             "Use shell_cd for directory changes instead of cd when possible."
         ),
         "parameters": {
@@ -118,6 +119,7 @@ SHELL_TOOL_SYSTEM_HINT = (
     "shell_exec runs in the project workspace and needs user approval unless the command prefix is allow-listed. "
     "Prefer shell_ls/shell_read over shell_exec for browsing files. "
     "Do not write source files with the shell. Use editor_propose_edit. "
+    "Do not create or push GitHub repositories with the shell. Use github_status, github_repos, github_repo, and github_create. "
     "On Windows, use PowerShell command syntax."
 )
 

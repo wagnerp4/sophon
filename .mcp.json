@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "arxiv": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "cd '/home/philipp/software/python/Signal Processing/NLP/Personal/sophon' && source .venv/bin/activate && python3 .mcp/arxiv_server.py"
+      ],
+      "description": "arXiv paper search and metadata tool"
+    }
+  },
+  "enabledMcpServers": ["arxiv"]
+}

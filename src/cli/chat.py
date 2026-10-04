@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import signal
+import threading
 import time
 import warnings
 from dataclasses import dataclass, field, replace
@@ -182,6 +183,10 @@ class ChatIo:
     on_heartbeat_end: Callable[[], None] | None = None
     on_permission: Callable[[object], str] | None = None
     on_setup_choice: Callable[[str], str] | None = None
+    on_choice: Callable[[str, list[tuple[str, str, bool]], float | None], str | None] | None = None
+    on_pick_model: Callable[[str], str | None] | None = None
+    on_keybinds_reload: Callable[[], None] | None = None
+    on_keybinds_edit: Callable[[str], None] | None = None
 
 
 def _default_emit(msg: str) -> None:
@@ -270,6 +275,77 @@ def _ask_permission(request: object) -> str:
     return cb(request)
 
 
+def _stdio_line(timeout_s: float | None) -> str | None:
+    if timeout_s is None or timeout_s <= 0:
+        try:
+            return input("choice: ").strip()
+        except EOFError:
+            return None
+    box: dict[str, str] = {}
+
+    def _read() -> None:
+        try:
+            box["value"] = input("choice: ").strip()
+        except EOFError:
+            box["value"] = ""
+
+    worker = threading.Thread(target=_read, daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        _emit("(timed out)")
+        return None
+    return box.get("value")
+
+
+def prompt_choice(
+    title: str,
+    options: list[tuple[str, str, bool]],
+    timeout_s: float | None = None,
+) -> str | None:
+    cb = _CURRENT_IO.on_choice
+    if cb is not None:
+        return cb(title, options, timeout_s)
+    try:
+        tty = bool(sys.stdin.isatty())
+    except Exception:
+        tty = False
+    if not tty:
+        return None
+    _emit(title)
+    for index, (_key, label, ok) in enumerate(options, start=1):
+        _emit(f"{index} {label}" if ok else f"{index} {label} (unavailable)")
+    raw = _stdio_line(timeout_s)
+    if raw is None or raw == "":
+        return None
+    if raw.isdigit():
+        pick = int(raw) - 1
+        if 0 <= pick < len(options) and options[pick][2]:
+            return options[pick][0]
+    for key, _label, ok in options:
+        if ok and raw.lower() == key.lower():
+            return key
+    return None
+
+
+def prompt_model(backend: str) -> str | None:
+    cb = _CURRENT_IO.on_pick_model
+    if cb is not None:
+        return cb(backend)
+    from backend.chat_resolve import list_server_models
+
+    try:
+        names = list(list_server_models(backend))
+    except Exception as exc:
+        _emit(f"error: {exc}")
+        return None
+    if not names:
+        _emit(f"(no models listed for {backend})")
+        return None
+    options = [(name, name, True) for name in names]
+    return prompt_choice(f"Model for {backend}", options, None)
+
+
 def _emit_think(thought: str) -> None:
     body = (thought or "").strip()
     if not body:
@@ -299,10 +375,46 @@ def _arg_path(args: dict) -> str | None:
     return None
 
 
-def _emit_tool_heartbeat(name: str, args: dict, result: str, latency_s: float) -> None:
+def _emit_tool_heartbeat(state: _SessionState, name: str, args: dict, result: str, latency_s: float) -> None:
+    from cli.dev_cards import format_approval_line, format_diff_card, format_run_card
+    from harness import ensure_harness
+
     preview = args_preview(name, args)
     ok = not str(result).lower().startswith("error:")
     path = _arg_path(args)
+    detail = ""
+    sandbox = "full"
+    try:
+        sandbox = ensure_harness(state).sandbox
+    except Exception:
+        sandbox = "full"
+    if name == "shell_exec":
+        command = str(args.get("command") or "")
+        detail = format_run_card(command, str(result or ""), sandbox=sandbox, ok=ok)
+        permission = str(getattr(state, "last_permission", "") or "")
+        approval = format_approval_line("shell_exec", permission, command.split()[0] if command.split() else "")
+        if approval:
+            detail = detail + "\n" + approval
+    elif name == "editor_propose_edit":
+        target = str(args.get("path") or "")
+        before = str(args.get("old_string") or "")
+        after = str(args.get("new_string") or args.get("content") or "")
+        detail = format_diff_card(target, before, after, root=Path(state.project_root))
+        if target:
+            touched = getattr(state, "turn_touch_paths", None)
+            if not isinstance(touched, list):
+                touched = []
+                state.turn_touch_paths = touched
+            if target not in touched:
+                touched.append(target)
+    if not ok:
+        first = ""
+        for line in str(result or "").splitlines():
+            if line.strip():
+                first = line.strip()
+                break
+        if first:
+            state.turn_last_error = first
     _emit_step(
         HeartbeatStep(
             kind="tool",
@@ -311,6 +423,7 @@ def _emit_tool_heartbeat(name: str, args: dict, result: str, latency_s: float) -
             path=path,
             ok=ok,
             latency_s=latency_s,
+            detail=detail,
         )
     )
     if str(name).startswith("skill_"):
@@ -466,6 +579,12 @@ class _SessionState:
     subagent_agent_type: str = "general"
     subagent_service: object | None = None
     last_subagent_run: object | None = None
+    energy: object | None = None
+    compact_auto: bool | None = None
+    compact_billed: bool = False
+    compact_failed: bool = False
+    seen_injected: list[str] = field(default_factory=list)
+    _energy_purpose: str = "chat"
 
 
 def _format_tool_max_rounds(value: int | None) -> str:
@@ -552,18 +671,20 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "model",
-        ("backend", "models", "models-sync", "model", "model-download", "setup"),
+        ("backend", "models", "models-sync", "model", "model-download", "setup", "energy"),
     ),
     (
         "generation",
-        ("params", "temp", "top-p", "top-k", "max", "seed", "rep", "tool-rounds", "unlimited"),
+        ("params", "temp", "top-p", "top-k", "max", "seed", "rep", "tool-rounds", "unlimited", "compact"),
     ),
     (
         "tools",
         (
             "tools",
+            "mcp",
             "mode",
             "permissions",
+            "keybind",
             "obsidian-status",
             "zotero-status",
             "zotero-tree",
@@ -571,6 +692,10 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "zotero-metrics",
             "zotero-read",
             "google-status",
+            "search",
+            "jobs",
+            "github",
+            "key",
             "overleaf-status",
             "overleaf-list",
             "overleaf-read",
@@ -819,27 +944,40 @@ def chat_session_ready(state: _SessionState) -> bool:
     return chat_session_has_weights(state)
 
 
-def harness_inventory_counts(state: _SessionState) -> tuple[int, int, int]:
+def _listed_tools(state: _SessionState):
     from cli.chat_tools import default_chat_tools
+    from harness.tools.registry import build_inventory
 
     catalog = state.skill_catalog
-    n_skills = len(catalog.entries) if catalog is not None else 0
     tools = default_chat_tools(
         tts_tool=_tts_tools_enabled(),
         sst_tool=_sst_tools_enabled(),
+        arxiv_tool=_arxiv_tools_wanted(),
         obsidian_tool=_obsidian_tools_wanted(),
         zotero_tool=_zotero_tools_wanted(),
         google_tool=_google_tools_wanted(),
         overleaf_tool=_overleaf_tools_wanted(),
         shell_tool=_shell_tools_wanted(),
+        github_tool=_github_tools_wanted(),
         editor_tool=_editor_tools_wanted(),
         memory_tool=state.memory_layer is not None and _memory_tools_wanted(),
         skill_tool=catalog is not None and _skill_tools_wanted(),
         subagent_tool=_spawn_tools_in_schema(state),
     )
-    n_mcp = 0
-    # TODO: count live MCP connectors once a connector registry exists
-    return n_skills, len(tools), n_mcp
+    return build_inventory(
+        tools,
+        project_root=state.project_root,
+        seen_injected=list(state.seen_injected),
+    )
+
+
+def harness_inventory_counts(state: _SessionState) -> tuple[int, int, int, int]:
+    from harness.tools.registry import count_origins
+
+    catalog = state.skill_catalog
+    n_skills = len(catalog.entries) if catalog is not None else 0
+    nexus, n_mcp, n_injected = count_origins(_listed_tools(state))
+    return n_skills, nexus, n_mcp, n_injected
 
 
 def _env_key_set_hint(key: str) -> str:
@@ -1046,6 +1184,74 @@ def switch_session_backend(state: _SessionState, token: str) -> None:
             _emit(f"(backend={backend}; no models listed — pick one in /models)")
         return
     _emit("(backend=hf; use /models and /model PRESET to load weights)")
+
+
+def _remember_energy_side(state: _SessionState) -> None:
+    from backend.energy.regime import ensure_energy, is_api_backend
+
+    session = ensure_energy(state)
+    if is_api_backend(state.backend_id):
+        if state.server_model:
+            session.last_api[state.backend_id] = str(state.server_model)
+        session.regime = "api"
+        return
+    session.regime = "local"
+    session.last_local_backend = state.backend_id
+    if state.backend_id == "hf":
+        session.last_local_model = str(state.preset_key or state.model_path or "")
+    else:
+        session.last_local_model = str(state.server_model or "")
+
+
+def apply_energy_backend(state: _SessionState, backend: str, model: str | None) -> None:
+    from backend.energy.regime import ensure_energy, is_api_backend
+    from backend.providers import provider_api_key
+    from backend.chat_resolve import missing_provider_key_message, normalize_chat_backend_token
+
+    resolved = normalize_chat_backend_token(backend)
+    if resolved is None:
+        _emit(f"unknown backend {backend!r}")
+        return
+    if is_api_backend(resolved) and not provider_api_key(resolved):
+        from cli.key_prompt import begin_key_prompt
+
+        _emit(begin_key_prompt(state, resolved))
+        return
+    _remember_energy_side(state)
+    session = ensure_energy(state)
+    state.backend_id = resolved
+    if is_api_backend(resolved):
+        chosen = (model or session.last_api.get(resolved) or "").strip()
+        if not chosen:
+            _emit(f"(backend={resolved}; pick a model)")
+            return
+        state.server_model = chosen
+        state.model_path = f"{resolved}:{chosen}"
+        session.last_api[resolved] = chosen
+        session.regime = "api"
+        _emit(f"(energy=api backend={resolved} model={chosen}; local weights kept)")
+        return
+    session.regime = "local"
+    session.last_local_backend = resolved
+    if resolved == "hf":
+        session.last_local_model = model or session.last_local_model
+        _emit("(energy=local backend=hf; resident weights kept)")
+        return
+    chosen = (model or session.last_local_model or "").strip()
+    if chosen:
+        state.server_model = chosen
+        state.model_path = f"{resolved}:{chosen}"
+        session.last_local_model = chosen
+        _emit(f"(energy=local backend={resolved} model={chosen}; weights kept)")
+        return
+    picked = _pick_default_server_model(resolved)
+    if picked:
+        state.server_model = picked
+        state.model_path = f"{resolved}:{picked}"
+        session.last_local_model = picked
+        _emit(f"(energy=local backend={resolved} model={picked})")
+        return
+    _emit(f"(energy=local backend={resolved}; no model listed)")
 
 
 def build_model_picker_entries_for_root(
@@ -1582,6 +1788,215 @@ def _cmd_backend(state: _SessionState, arg: str) -> bool:
         _emit(f"(auto resolved to {resolved})")
         return False
     switch_session_backend(state, token)
+    return False
+
+
+@_register("energy", "Energy regime: /energy [local|api [PROVIDER]|cap|on-limit|persist].")
+def _cmd_energy(state: _SessionState, arg: str) -> bool:
+    from backend.energy.ledger import sum_month, sum_today
+    from backend.energy.regime import (
+        API_BACKENDS,
+        LOCAL_BACKENDS,
+        api_choices,
+        ensure_energy,
+        is_api_backend,
+        persist_energy,
+        status_line,
+    )
+
+    session = ensure_energy(state)
+    parts = [bit for bit in arg.split() if bit]
+    if not parts:
+        _emit(status_line(session, spent_today=sum_today(session)))
+        _emit(
+            f"backend={state.backend_id} monthly=${sum_month(session):.2f}/{session.monthly_usd:.2f} "
+            f"rpm={session.rpm} on-limit={session.on_limit} timeout={session.ask_timeout_s:.0f}s"
+        )
+        _emit(f"last_local={session.last_local_backend or '-'} last_api={session.last_api or '-'}")
+        return False
+    head = parts[0].lower()
+    if head == "persist":
+        path = persist_energy(session)
+        _emit(f"(wrote {path})")
+        return False
+    if head == "cap":
+        if len(parts) == 1:
+            _emit(f"daily={session.daily_usd} monthly={session.monthly_usd} rpm={session.rpm}")
+            return False
+        if len(parts) < 3:
+            _emit("usage: /energy cap daily 5 | monthly 40 | rpm 60")
+            return False
+        kind = parts[1].lower()
+        try:
+            value = float(parts[2])
+        except ValueError:
+            _emit("usage: /energy cap daily 5")
+            return False
+        if kind == "daily":
+            session.daily_usd = value
+        elif kind == "monthly":
+            session.monthly_usd = value
+        elif kind == "rpm":
+            session.rpm = int(value)
+        else:
+            _emit("usage: /energy cap daily|monthly|rpm VALUE")
+            return False
+        _emit(status_line(session, spent_today=sum_today(session)))
+        return False
+    if head == "on-limit":
+        _emit("on-limit is ask-and-hold, then stop after SOPHON_ENERGY_ASK_TIMEOUT_S")
+        return False
+    if head == "local":
+        backend = parts[1].lower() if len(parts) > 1 else (session.last_local_backend or "")
+        if backend and backend not in LOCAL_BACKENDS:
+            _emit("usage: /energy local [hf|ollama|lmstudio]")
+            return False
+        if not backend:
+            choice = prompt_choice(
+                "Local backend",
+                [(name, name, True) for name in LOCAL_BACKENDS],
+                None,
+            )
+            if not choice:
+                _emit("(energy local cancelled)")
+                return False
+            backend = choice
+        model = session.last_local_model if backend == session.last_local_backend else ""
+        apply_energy_backend(state, backend, model or None)
+        return False
+    if head == "api":
+        provider = parts[1].lower() if len(parts) > 1 else ""
+        if provider and provider not in API_BACKENDS:
+            _emit("usage: /energy api [openai|anthropic|google]")
+            return False
+        if not provider:
+            choice = prompt_choice("API backend", api_choices(), None)
+            if not choice:
+                _emit("(energy api cancelled)")
+                return False
+            provider = choice
+        if not is_api_backend(provider):
+            _emit(f"unknown api backend {provider!r}")
+            return False
+        model = session.last_api.get(provider, "")
+        if not model:
+            picked = prompt_model(provider)
+            if not picked:
+                _emit("(energy api cancelled)")
+                return False
+            model = picked
+        apply_energy_backend(state, provider, model)
+        return False
+    _emit("usage: /energy [local|api [PROVIDER]|cap|persist]")
+    return False
+
+
+def _context_length_for(state: _SessionState) -> int:
+    from backend.energy.regime import ensure_energy, is_api_backend
+
+    raw = getattr(state.stats, "max_position_embeddings", None)
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    if ensure_energy(state).regime == "api" or is_api_backend(state.backend_id):
+        return 128000
+    return 32768
+
+
+def _compact_auto_on(state: _SessionState) -> bool:
+    from backend.energy.regime import ensure_energy, is_api_backend
+    from processing.text.context.compact import env_auto_enabled
+
+    if state.compact_failed or state.compact_auto is False:
+        return False
+    api = ensure_energy(state).regime == "api" or is_api_backend(state.backend_id)
+    if api:
+        return bool(state.compact_billed) and env_auto_enabled()
+    if state.compact_auto is None:
+        return env_auto_enabled()
+    return bool(state.compact_auto)
+
+
+def _run_compact(state: _SessionState, *, force: bool) -> None:
+    from backend.energy.gate import estimate_usd
+    from backend.energy.regime import ensure_energy, is_api_backend
+    from cli.agent_runtime import complete_chat_turn
+    from processing.text.context.compact import (
+        apply_summary,
+        estimate_tokens,
+        keep_turns,
+        split_prefix_tail,
+        should_compact,
+        summary_messages,
+    )
+
+    messages = [dict(item) for item in state.messages if isinstance(item, dict)]
+    prefix, tail = split_prefix_tail(messages, keep_turns())
+    if not prefix:
+        _emit("(compact: nothing older than the kept tail)")
+        return
+    api = ensure_energy(state).regime == "api" or is_api_backend(state.backend_id)
+    if not force and not should_compact(messages, context_length=_context_length_for(state)):
+        return
+    if api:
+        tokens = estimate_tokens(prefix)
+        usd, tag = estimate_usd(state.backend_id, str(state.server_model or ""), tokens, 800)
+        if not force and not state.compact_billed:
+            _emit(
+                f"(compact skipped: api, est ${usd:.2f} {tag} — /compact now or /compact billed on)"
+            )
+            return
+        choice = prompt_choice(
+            f"Compact will bill about ${usd:.2f} ({tag})",
+            [("continue", "1 continue", True), ("stop", "3 stop", True)],
+            ensure_energy(state).ask_timeout_s,
+        )
+        if choice != "continue":
+            _emit("(compact skipped: not confirmed)")
+            return
+    before = len(messages)
+    state._energy_purpose = "compact"
+    try:
+        result = complete_chat_turn(state, summary_messages(prefix), None)
+    finally:
+        state._energy_purpose = "chat"
+    text = str(getattr(result, "text", "") or "").strip()
+    if getattr(result, "finish_reason", "") == "energy" or not text or text.startswith("(energy stop"):
+        state.compact_failed = True
+        _emit(text or "(compact failed; auto disabled for this session)")
+        return
+    state.messages = apply_summary(text, tail)
+    _emit(f"(compacted {len(prefix)} turns -> summary; kept {before - len(prefix)} in the tail)")
+
+
+@_register("compact", "Conversation compact: /compact [on|off|now|status|billed on|off]. Not /memory compact.")
+def _cmd_compact(state: _SessionState, arg: str) -> bool:
+    parts = [bit for bit in arg.split() if bit]
+    if not parts or parts[0].lower() == "status":
+        _emit(
+            f"compact auto={'on' if _compact_auto_on(state) else 'off'} "
+            f"billed={'on' if state.compact_billed else 'off'} "
+            f"failed={'yes' if state.compact_failed else 'no'}"
+        )
+        return False
+    head = parts[0].lower()
+    if head == "on":
+        state.compact_auto = True
+        state.compact_failed = False
+        _emit("(compact auto on for local; api still needs /compact billed on)")
+        return False
+    if head == "off":
+        state.compact_auto = False
+        _emit("(compact auto off)")
+        return False
+    if head == "billed" and len(parts) > 1:
+        flag = parts[1].lower()
+        state.compact_billed = flag in ("on", "1", "true", "yes")
+        _emit(f"(compact billed {'on' if state.compact_billed else 'off'})")
+        return False
+    if head == "now":
+        _run_compact(state, force=True)
+        return False
+    _emit("usage: /compact [on|off|now|status|billed on|off]")
     return False
 
 
@@ -2553,6 +2968,28 @@ def _cmd_eval(state: _SessionState, arg: str) -> bool:
     return False
 
 
+@_register("arxiv-status", "Show arXiv search tool status.")
+def _cmd_arxiv_status(state: _SessionState, _arg: str) -> bool:
+    _ = state
+    from integrations.arxiv.client import arxiv_tools_enabled
+
+    enabled = arxiv_tools_enabled()
+    _emit(f"arxiv tools: {'on' if enabled else 'off'}")
+    if not enabled:
+        _emit("arxiv server not found at .mcp/arxiv_server.py")
+        return False
+    try:
+        from integrations.arxiv.tools import arxiv_search
+        result = arxiv_search("test", max_results=1)
+        if "error" in result:
+            _emit(f"reachable: no ({result['error']})")
+        else:
+            _emit("reachable: yes")
+    except Exception as exc:
+        _emit(f"reachable: no ({exc})")
+    return False
+
+
 @_register("obsidian-status", "Show Obsidian Local REST API tool status.")
 def _cmd_obsidian_status(state: _SessionState, _arg: str) -> bool:
     _ = state
@@ -2685,6 +3122,89 @@ def _cmd_google_status(state: _SessionState, _arg: str) -> bool:
         f"cse={'yes' if cse_configured() else 'no'} "
         f"SOPHON_SEARXNG_URL / SOPHON_GOOGLE_CSE_KEY / SOPHON_GOOGLE_CSE_CX)"
     )
+    _emit("slash: /search  (list engines, on|off, enable|disable SOURCE, SOURCE [QUERY])")
+    return False
+
+
+@_register(
+    "search",
+    "Search engines: /search | on|off | contact EMAIL|clear | enable SOURCE|all | disable SOURCE | SOURCE [QUERY].",
+    aliases=("search-status",),
+)
+def _cmd_search(state: _SessionState, arg: str) -> bool:
+    _ = state
+    from integrations.search.status import handle_search_command
+
+    try:
+        _emit(handle_search_command(arg))
+    except (ValueError, RuntimeError) as exc:
+        _emit(str(exc))
+    return False
+
+
+@_register(
+    "jobs",
+    "Job list: /jobs [queue|track student|full|ingest|discover|match|recommend|fetch].",
+)
+def _cmd_jobs(state: _SessionState, arg: str) -> bool:
+    from integrations.jobs.command import handle_jobs_command
+
+    try:
+        _emit(handle_jobs_command(arg, state))
+    except (OSError, RuntimeError, ValueError) as exc:
+        _emit(str(exc))
+    return False
+
+
+@_register("github", "GitHub account: /github [status|repos|repo NAME|create NAME].")
+def _cmd_github(state: _SessionState, arg: str) -> bool:
+    from integrations.github import execute_github_tool
+
+    parts = [bit for bit in arg.split() if bit]
+    from integrations.github.client import github_token
+    from cli.key_prompt import begin_key_prompt
+
+    if not github_token():
+        _emit(begin_key_prompt(state, "github"))
+        return False
+    if not parts or parts[0].lower() == "status":
+        _emit(execute_github_tool("github_status", {}))
+        return False
+    head = parts[0].lower()
+    if head == "repos":
+        _emit(execute_github_tool("github_repos", {}))
+        return False
+    if head == "repo" and len(parts) > 1:
+        _emit(execute_github_tool("github_repo", {"name": parts[1]}))
+        return False
+    if head == "create" and len(parts) > 1:
+        _emit("github_create needs the model tool so the harness can ask. Use agent mode and ask to create " + parts[1])
+        return False
+    _emit("usage: /github [status|repos|repo OWNER/NAME|create NAME]")
+    return False
+
+
+@_register("key", "Save a required key from chat: /key [github|openai|anthropic|google|cancel].")
+def _cmd_key(state: _SessionState, arg: str) -> bool:
+    from cli.key_prompt import KEY_PROMPTS, begin_key_prompt, missing_key_ids
+
+    token = arg.strip().lower()
+    if token in ("cancel", "clear"):
+        state.pending_secret_key = ""
+        _emit("(key prompt cancelled)")
+        return False
+    if not token:
+        missing = missing_key_ids()
+        if not missing:
+            _emit("required keys are set")
+            return False
+        _emit("missing: " + ", ".join(missing))
+        _emit("Start one with /key " + missing[0])
+        return False
+    if token not in KEY_PROMPTS:
+        _emit("usage: /key [github|openai|anthropic|google|cancel]")
+        return False
+    _emit(begin_key_prompt(state, token))
     return False
 
 
@@ -2782,7 +3302,7 @@ def _cmd_overleaf_read(state: _SessionState, arg: str) -> bool:
     return False
 
 
-@_register("tools", "Show enabled chat tools (speak / vault / zotero / google / overleaf / shell / editor / subagent).")
+@_register("tools", "Show NexusTools, MCP retrace, and injected tools. /tools [nexus|mcp|injected|all].")
 def _cmd_tools(state: _SessionState, _arg: str) -> bool:
     from cli.code_assist import editor_tools_enabled
     from integrations.google.bookmarks import bookmarks_available
@@ -2801,6 +3321,8 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
 
     tts_on = _tts_tools_enabled()
     sst_on = _sst_tools_enabled()
+    from integrations.arxiv.client import arxiv_tools_enabled
+    arxiv_on = arxiv_tools_enabled()
     obs_on = obsidian_tools_enabled()
     zot_on = zotero_tools_enabled()
     google_on = _google_tools_wanted()
@@ -2813,6 +3335,7 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
     _emit(f"dotenv: {DOTENV_LOAD_PATH if DOTENV_LOAD_PATH else '(not loaded)'}")
     _emit(f"speak tool: {'on' if tts_on else 'off'} (SOPHON_TTS_TOOL)")
     _emit(f"transcribe tool: {'on' if sst_on else 'off'} (SOPHON_SST_TOOL)")
+    _emit(f"arxiv tools: {'on' if arxiv_on else 'off'}")
     _emit(f"vault tools: {'on' if obs_on else 'off'} (SOPHON_OBSIDIAN_TOOLS)")
     _emit(f"zotero tools: {'on' if zot_on else 'off'} (SOPHON_ZOTERO_TOOLS, default on if library reachable)")
     _emit(
@@ -2823,6 +3346,13 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
     )
     _emit(f"overleaf tools: {'on' if overleaf_on else 'off'} (SOPHON_OVERLEAF_TOOLS)")
     _emit(f"shell tools: {'on' if shell_on else 'off'} (SOPHON_SHELL_TOOLS)")
+    from integrations.github import github_token
+
+    github_on = _github_tools_wanted()
+    _emit(
+        f"github tools: {'on' if github_on else 'off'} "
+        f"(token={'yes' if github_token() else 'no'} SOPHON_GITHUB_TOOLS / SOPHON_GITHUB_TOKEN)"
+    )
     _emit(f"editor tools: {'on' if editor_on else 'off'} (SOPHON_EDITOR_TOOLS)")
     from harness import ensure_harness
 
@@ -2838,6 +3368,8 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
         _emit("speak: speak")
     if sst_on:
         _emit("sst: transcribe")
+    if arxiv_on:
+        _emit("arxiv: arxiv_search, arxiv_get_paper")
     if obs_on:
         _emit("vault: vault_search, vault_list, vault_read, vault_recent")
     if zot_on:
@@ -2857,6 +3389,8 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
         )
     if shell_on:
         _emit("shell: shell_pwd, shell_cd, shell_ls, shell_read, shell_exec")
+    if github_on:
+        _emit("github: github_status, github_repos, github_repo, github_create")
     if editor_on:
         _emit("editor: editor_read, editor_propose_edit, editor_status")
         _emit("review: /assist status | accept | decline | undo | redo")
@@ -2872,6 +3406,7 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
         and not google_on
         and not overleaf_on
         and not shell_on
+        and not github_on
         and not tts_on
         and not sst_on
         and not editor_on
@@ -2883,6 +3418,14 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
     else:
         _emit("all enabled tool packs are available together (no tool-pack mode switch)")
         _emit("harness /mode plan denies shell_exec and proposes; /permissions lists rules")
+    from harness.tools.registry import format_inventory
+
+    origin = _arg.strip().lower()
+    if origin not in ("", "all", "nexus", "mcp", "injected"):
+        _emit("usage: /tools [nexus|mcp|injected|all]")
+        origin = "all"
+    for line in format_inventory(_listed_tools(state), origin or None):
+        _emit(line)
     return False
 
 
@@ -2929,6 +3472,24 @@ def _cmd_mode(state: _SessionState, arg: str) -> bool:
     return False
 
 
+@_register("mcp", "MCP inventory: /mcp [status|list]. Not a call verb.")
+def _cmd_mcp(state: _SessionState, arg: str) -> bool:
+    from harness.tools.registry import format_inventory
+    from integrations.mcp.host import mcp_status_lines
+
+    token = arg.strip().lower()
+    if token in ("", "status"):
+        for line in mcp_status_lines(state.project_root):
+            _emit(line)
+        return False
+    if token == "list":
+        for line in format_inventory(_listed_tools(state), "mcp"):
+            _emit(line)
+        return False
+    _emit("usage: /mcp [status|list]")
+    return False
+
+
 @_register("permissions", "Show harness rules. /permissions [reload].")
 def _cmd_permissions(state: _SessionState, arg: str) -> bool:
     from harness import ensure_harness
@@ -2940,6 +3501,69 @@ def _cmd_permissions(state: _SessionState, arg: str) -> bool:
         _emit("(harness policy reloaded)")
     _emit(harness.describe())
     return False
+
+
+@_register(
+    "keybind",
+    "Keybinds: /keybind [set ACTION KEY | unset ACTION | edit | reload]. File: .sophon/keybinds.yaml.",
+)
+def _cmd_keybind(state: _SessionState, arg: str) -> bool:
+    from cli.tui.keybinds import (
+        format_keybind_list,
+        keybinds_path,
+        load_keybinds,
+        set_keybind,
+    )
+
+    parts = [bit for bit in arg.split() if bit]
+    root = state.project_root
+    if not parts:
+        for line in format_keybind_list(load_keybinds(root)):
+            _emit(line)
+        _emit(f"file: {keybinds_path(root)}")
+        return False
+    head = parts[0].lower()
+    if head == "reload":
+        _reload_keybinds_ui()
+        _emit("(keybinds reloaded)")
+        return False
+    if head == "edit":
+        path = keybinds_path(root)
+        _emit(f"keybinds file: {path}")
+        edit = _CURRENT_IO.on_keybinds_edit
+        if callable(edit):
+            edit(str(path))
+        return False
+    if head == "unset":
+        if len(parts) < 2:
+            _emit("usage: /keybind unset ACTION")
+            return False
+        message = set_keybind(parts[1], "", root)
+        if message:
+            _emit(message)
+            return False
+        _reload_keybinds_ui()
+        _emit(f"(unbound {parts[1]})")
+        return False
+    if head == "set":
+        if len(parts) < 3:
+            _emit("usage: /keybind set ACTION KEY")
+            return False
+        message = set_keybind(parts[1], parts[2], root)
+        if message:
+            _emit(message)
+            return False
+        _reload_keybinds_ui()
+        _emit(f"({parts[1]} = {parts[2]})")
+        return False
+    _emit("usage: /keybind [set ACTION KEY | unset ACTION | edit | reload]")
+    return False
+
+
+def _reload_keybinds_ui() -> None:
+    callback = _CURRENT_IO.on_keybinds_reload
+    if callable(callback):
+        callback()
 
 
 @_register("assist", "Code review queue: /assist [status|accept|decline|undo|redo].")
@@ -3834,6 +4458,12 @@ def _run_shell_mode_command(state: _SessionState, command: str) -> None:
 
 def _dispatch_command(state: _SessionState, line: str) -> tuple[bool, bool]:
     """Returns (handled, should_generate)."""
+    from cli.key_prompt import take_pending_secret
+
+    secret_note = take_pending_secret(state, line)
+    if secret_note is not None:
+        _emit(secret_note)
+        return True, False
     if not line:
         return True, False
     stripped = line.strip()
@@ -4066,6 +4696,17 @@ def _commit_assistant_turn(
         tools=tools,
         tool_rounds=tool_rounds,
     )
+    tool_count = len(tools or [])
+    if len(text) > 800 or tool_count > 3:
+        from cli.dev_cards import format_turn_summary
+
+        summary = format_turn_summary(
+            text,
+            list(getattr(state, "turn_touch_paths", []) or []),
+            str(getattr(state, "turn_last_error", "") or ""),
+        )
+        if summary:
+            _emit_step(HeartbeatStep(kind="context", name="summary", detail=summary, ok=True))
     _emit_assistant(str(text), trace)
     if not spoke:
         _maybe_play_assistant_tts(state, str(text))
@@ -4398,6 +5039,12 @@ def _sst_tools_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _arxiv_tools_wanted() -> bool:
+    from integrations.arxiv.client import arxiv_tools_enabled
+
+    return arxiv_tools_enabled()
+
+
 def _obsidian_tools_wanted() -> bool:
     from integrations.obsidian.client import obsidian_tools_enabled
 
@@ -4432,6 +5079,12 @@ def _shell_tools_wanted() -> bool:
     from integrations.shell.runner import shell_tools_enabled
 
     return shell_tools_enabled()
+
+
+def _github_tools_wanted() -> bool:
+    from integrations.github import github_tools_enabled
+
+    return github_tools_enabled()
 
 
 def _editor_tools_wanted() -> bool:
@@ -4710,9 +5363,11 @@ def _authorize_tool(state: _SessionState, name: str, args: dict) -> str | None:
 
 def _execute_one_tool(state: _SessionState, call) -> str:
     from cli.assist_tools import EDITOR_TOOL_NAMES, execute_editor_tool
+    from integrations.arxiv import ARXIV_TOOL_NAMES, execute_arxiv_tool
     from integrations.google.tools import GOOGLE_TOOL_NAMES, execute_google_tool
     from integrations.obsidian.tools import VAULT_TOOL_NAMES, execute_vault_tool
     from integrations.overleaf.tools import OVERLEAF_TOOL_NAMES, execute_overleaf_tool
+    from integrations.github import GITHUB_TOOL_NAMES, execute_github_tool
     from integrations.zotero.tools import ZOTERO_TOOL_NAMES, execute_zotero_tool
     from integrations.shell.runner import ShellSession
     from integrations.shell.tools import SHELL_TOOL_NAMES, execute_shell_tool
@@ -4729,6 +5384,15 @@ def _execute_one_tool(state: _SessionState, call) -> str:
     args = getattr(call, "arguments", None)
     if not isinstance(args, dict):
         args = {}
+    if name == "shell_exec":
+        from cli.key_prompt import contains_secret
+
+        command = str(args.get("command") or "")
+        if contains_secret(command):
+            return (
+                "error: do not put a token in shell_exec. "
+                "GitHub tokens are set with /key github. github_status is a tool, not a PowerShell command."
+            )
     quiet = bool(getattr(state, "quiet", False))
 
     def progress(tool_name: str, preview: object) -> None:
@@ -4773,6 +5437,13 @@ def _execute_one_tool(state: _SessionState, call) -> str:
         return _execute_speak_tool(state, args)
     if name == TRANSCRIBE_TOOL_NAME:
         return _execute_transcribe_tool(state, args)
+    if name in ARXIV_TOOL_NAMES:
+        preview = args.get("query") or args.get("paper_id") or ""
+        progress(name, preview)
+        try:
+            return execute_arxiv_tool(str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
     if name in VAULT_TOOL_NAMES:
         progress(name, args)
         try:
@@ -4800,11 +5471,27 @@ def _execute_one_tool(state: _SessionState, call) -> str:
             return execute_overleaf_tool(str(name), args)
         except Exception as exc:
             return f"error: {exc}"
+    if name in GITHUB_TOOL_NAMES:
+        from integrations.github.client import github_token
+        from cli.key_prompt import begin_key_prompt
+
+        if not github_token():
+            return begin_key_prompt(state, "github")
+        progress(name, args.get("name") or "")
+        try:
+            return execute_github_tool(str(name), args)
+        except Exception as exc:
+            return f"error: {exc}"
     if name in SHELL_TOOL_NAMES:
         if state.shell_session is None:
             state.shell_session = ShellSession(cwd=Path(state.project_root).resolve())
         session = state.shell_session
         assert isinstance(session, ShellSession)
+        from harness import ensure_harness
+
+        harness = ensure_harness(state)
+        session.sandbox_mode = harness.sandbox
+        session.sandbox_workspace = harness.workspace_path()
         preview = args.get("command") or args.get("path") or ""
         progress(name, preview)
         try:
@@ -4818,7 +5505,10 @@ def _execute_one_tool(state: _SessionState, call) -> str:
             return execute_editor_tool(state, str(name), args)
         except Exception as exc:
             return f"error: {exc}"
-    return f"error: unknown tool {name!r}"
+    from harness.tools.registry import note_injected
+
+    note_injected(state, str(name))
+    return f"error: injected tool {name!r} has no local executor"
 
 
 def _estimate_token_count(text: str) -> int:
@@ -4834,43 +5524,37 @@ def _completion_token_counts(completion: object, *, text: str) -> tuple[int, int
 
 
 def _session_tool_bundle(state: _SessionState) -> tuple[list[dict], str | None]:
-    from cli.chat_tools import chat_tools_system_hint, default_chat_tools
+    from cli.chat_tools import chat_tools_system_hint
     from cli.code_assist import editor_context_hint, ensure_assist
     from harness import ensure_harness, harness_system_hint
 
     ensure_assist(state)
     tts_on = _tts_tools_enabled()
     sst_on = _sst_tools_enabled()
+    arxiv_on = _arxiv_tools_wanted()
     obs_on = _obsidian_tools_wanted()
     zot_on = _zotero_tools_wanted()
     google_on = _google_tools_wanted()
     overleaf_on = _overleaf_tools_wanted()
     shell_on = _shell_tools_wanted()
+    github_on = _github_tools_wanted()
     editor_on = _editor_tools_wanted()
     memory_on = state.memory_layer is not None and _memory_tools_wanted()
     skill_on = state.skill_catalog is not None and _skill_tools_wanted()
     spawn_on = _spawn_tools_in_schema(state)
-    tools = default_chat_tools(
-        tts_tool=tts_on,
-        sst_tool=sst_on,
-        obsidian_tool=obs_on,
-        zotero_tool=zot_on,
-        google_tool=google_on,
-        overleaf_tool=overleaf_on,
-        shell_tool=shell_on,
-        editor_tool=editor_on,
-        memory_tool=memory_on,
-        skill_tool=skill_on,
-        subagent_tool=spawn_on,
-    )
+    from harness.tools.registry import model_schemas
+
+    tools = model_schemas(_listed_tools(state))
     hint = chat_tools_system_hint(
         tts_tool=tts_on,
         sst_tool=sst_on,
+        arxiv_tool=arxiv_on,
         obsidian_tool=obs_on,
         zotero_tool=zot_on,
         google_tool=google_on,
         overleaf_tool=overleaf_on,
         shell_tool=shell_on,
+        github_tool=github_on,
         editor_tool=editor_on,
         memory_tool=memory_on,
         skill_tool=skill_on,
@@ -4919,7 +5603,7 @@ def _run_tool_loop(
         tools=tools,
         execute_tool=_execute_one_tool,
         emit_think=_emit_think,
-        emit_tool=_emit_tool_heartbeat,
+        emit_tool=lambda name, args, result, latency: _emit_tool_heartbeat(state, name, args, result, latency),
         emit_line=_emit,
     )
     return _ServerLoopOutcome(
@@ -4951,6 +5635,12 @@ def _run_generation(state: _SessionState) -> None:
         if state.messages and state.messages[-1].get("role") == "user":
             state.messages.pop()
         return
+
+    state.turn_touch_paths = []
+    state.turn_last_error = ""
+
+    if _compact_auto_on(state):
+        _run_compact(state, force=False)
 
     cancelled = {"flag": False}
     prev_handler = signal.getsignal(signal.SIGINT)

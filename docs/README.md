@@ -4,7 +4,7 @@ CLI and library wrappers around local Hugging Face weights, with optional retrie
 (LEANN index, LightRAG structure, Adaptive-RAG gate) and persistent SQLite chat memory.
 
 Long-term product map (harness, editor, dashboard, subagents, swarms, self-evolution, constraints):
-[VISION.md](VISION.md) and [direction/](direction/README.md). Subagent spawn and 3090/API placement: [direction/subagents.md](direction/subagents.md). Item backlog: [TODO.md](TODO.md).
+[VISION.md](VISION.md) and [direction/](direction/README.md). Harness vs production CLIs: [direction/harness-comparison.md](direction/harness-comparison.md). Subagent spawn and 3090/API placement: [direction/subagents.md](direction/subagents.md). Item backlog: [TODO.md](TODO.md). Public stub: [wagnerp4.github.io/sophon](https://wagnerp4.github.io/sophon/).
 
 ## Install
 

@@ -12,6 +12,7 @@ from integrations.google.search import (
     format_search_results as format_web_results,
 )
 from integrations.google.search import search_web, web_search_tools_enabled
+from integrations.search.dispatch import source_names_for_tool
 
 GMAIL_SEARCH = "gmail_search"
 GMAIL_READ = "gmail_read"
@@ -141,36 +142,63 @@ BOOKMARKS_TREE_TOOL: dict[str, Any] = {
     },
 }
 
-WEB_SEARCH_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": WEB_SEARCH,
-        "description": (
-            "Search the public web. Uses SearXNG when SOPHON_SEARXNG_URL is set, "
-            "otherwise Google Custom Search. Returns titles, urls, and snippets. Not personalized."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search phrase.",
+_WEB_SEARCH_DESCRIPTION = (
+    "Look up a named no-key vertical. Always pass source. "
+    "Do not use source=auto unless SearXNG or Google CSE is configured. "
+    "Keep query short: names and topic words only. Do not add years, 'latest', or 'github' to github queries. "
+    "Repos and released code: github. Datasets and records: zenodo, then github. "
+    "Papers: arxiv, openalex, crossref, pubmed, europepmc, semanticscholar. "
+    "Encyclopedia: wikipedia, wikidata. Instant answers: ddg (often empty). "
+    "Models and Hub datasets: huggingface. Docs: mdn, stackexchange, hn. "
+    "This is not a browser. google off in the HUD means Gmail/Drive are off. web_search is separate."
+)
+
+
+def web_search_tool() -> dict[str, Any]:
+    sources = source_names_for_tool()
+    return {
+        "type": "function",
+        "function": {
+            "name": WEB_SEARCH,
+            "description": _WEB_SEARCH_DESCRIPTION,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search phrase.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max hits (default 5, max 10).",
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": sources,
+                        "description": (
+                            "Backend. auto = SearXNG then CSE. Named values call that source only."
+                        ),
+                    },
                 },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max hits (default 5, max 10).",
-                },
+                "required": ["query", "source"],
+                "additionalProperties": False,
             },
-            "required": ["query"],
-            "additionalProperties": False,
         },
-    },
-}
+    }
+
+
+WEB_SEARCH_TOOL: dict[str, Any] = web_search_tool()
 
 GOOGLE_TOOL_SYSTEM_HINT = (
     "You can use gmail_search / gmail_read for Gmail, drive_tree / drive_list for Google Drive, "
-    "bookmarks_tree for the Chrome bookmark export, and web_search for live web results "
-    "(SearXNG or Google Custom Search). "
+    "bookmarks_tree for the Chrome bookmark export, and web_search for live lookup. "
+    "web_search is not a browser. Do not claim you searched via Chrome or browser-use. "
+    "google off means Gmail/Drive are unavailable. web_search is a separate tool. "
+    "Always pass web_search source. Do not use auto when SearXNG and CSE are missing. "
+    "Keep queries short. github for repos, zenodo for datasets, "
+    "arxiv/openalex/crossref/pubmed/europepmc/semanticscholar for papers, "
+    "huggingface for Hub models and datasets, wikipedia/wikidata for encyclopedia, "
+    "stackexchange/hn/mdn for community docs. "
     "Do not claim you cannot access these when the tools are listed. "
     "TUM / Outlook mail is not available. Prefer search tools over guessing."
 )
@@ -190,7 +218,7 @@ def google_chat_tools() -> list[dict[str, Any]]:
     if bookmarks_available():
         tools.append(BOOKMARKS_TREE_TOOL)
     if web_search_tools_enabled():
-        tools.append(WEB_SEARCH_TOOL)
+        tools.append(web_search_tool())
     return tools
 
 
@@ -256,7 +284,8 @@ def execute_google_tool(name: str, arguments: dict[str, Any]) -> str:
             n = int(limit)
         except (TypeError, ValueError):
             n = 5
-        hits = search_web(query, limit=n)
+        source = str(arguments.get("source") or "auto").strip() or "auto"
+        hits = search_web(query, limit=n, source=source)
         return _payload(format_web_results(hits, query=query))
     return f"error: unknown google tool {name!r}"
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from cli.assist_tools import EDITOR_TOOL_SYSTEM_HINT, editor_chat_tools
+from integrations.arxiv.tools import ARXIV_TOOL_SYSTEM_HINT, arxiv_chat_tools
+from integrations.github import GITHUB_TOOL_SYSTEM_HINT, github_chat_tools
 from integrations.google.tools import GOOGLE_TOOL_SYSTEM_HINT, google_chat_tools
 from integrations.obsidian.tools import OBSIDIAN_TOOL_SYSTEM_HINT, obsidian_chat_tools
 from integrations.overleaf.tools import OVERLEAF_TOOL_SYSTEM_HINT, overleaf_chat_tools
@@ -18,11 +20,13 @@ def default_chat_tools(
     *,
     tts_tool: bool = False,
     sst_tool: bool = False,
+    arxiv_tool: bool = False,
     obsidian_tool: bool = False,
     zotero_tool: bool = False,
     google_tool: bool = False,
     overleaf_tool: bool = False,
     shell_tool: bool = False,
+    github_tool: bool = False,
     editor_tool: bool = False,
     memory_tool: bool = False,
     skill_tool: bool = False,
@@ -33,6 +37,8 @@ def default_chat_tools(
         tools.append(SPEAK_TOOL)
     if sst_tool:
         tools.append(TRANSCRIBE_TOOL)
+    if arxiv_tool:
+        tools.extend(arxiv_chat_tools())
     if obsidian_tool:
         tools.extend(obsidian_chat_tools())
     if zotero_tool:
@@ -43,6 +49,8 @@ def default_chat_tools(
         tools.extend(overleaf_chat_tools())
     if shell_tool:
         tools.extend(shell_chat_tools())
+    if github_tool:
+        tools.extend(github_chat_tools())
     if editor_tool:
         tools.extend(editor_chat_tools())
     if memory_tool:
@@ -58,11 +66,13 @@ def chat_tools_system_hint(
     *,
     tts_tool: bool = False,
     sst_tool: bool = False,
+    arxiv_tool: bool = False,
     obsidian_tool: bool = False,
     zotero_tool: bool = False,
     google_tool: bool = False,
     overleaf_tool: bool = False,
     shell_tool: bool = False,
+    github_tool: bool = False,
     editor_tool: bool = False,
     memory_tool: bool = False,
     skill_tool: bool = False,
@@ -73,6 +83,8 @@ def chat_tools_system_hint(
         parts.append(TTS_TOOL_SYSTEM_HINT)
     if sst_tool:
         parts.append(SST_TOOL_SYSTEM_HINT)
+    if arxiv_tool:
+        parts.append(ARXIV_TOOL_SYSTEM_HINT)
     if obsidian_tool:
         parts.append(OBSIDIAN_TOOL_SYSTEM_HINT)
     if zotero_tool:
@@ -83,6 +95,8 @@ def chat_tools_system_hint(
         parts.append(OVERLEAF_TOOL_SYSTEM_HINT)
     if shell_tool:
         parts.append(SHELL_TOOL_SYSTEM_HINT)
+    if github_tool:
+        parts.append(GITHUB_TOOL_SYSTEM_HINT)
     if editor_tool:
         parts.append(EDITOR_TOOL_SYSTEM_HINT)
     if memory_tool:

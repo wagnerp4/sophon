@@ -115,10 +115,35 @@ SOPHON_QUOTES_SYMBOLS=AAPL,MSFT,NVDA,GOOGL,AMZN,META,SPY,QQQ,IWM
 | News / papers | `SOPHON_NEWS_*`, `SOPHON_PAPERS_*` | Left: RSS + HN. Right: arXiv topic picks + HF daily trending |
 | Prediction markets | `SOPHON_POLYMARKET_*` | Gamma API; optional event slugs |
 | Live Twitch | `SOPHON_TWITCH_*` | App client id/secret; `MODE=top` or `channels` |
-| Google mail / Drive / bookmarks / web search | `SOPHON_GOOGLE_*`, `SOPHON_BOOKMARKS_PATH`, `SOPHON_GOOGLE_CSE_*` | See [docs/integrations/google/README.md](../integrations/google/README.md) |
+| Google mail / Drive / bookmarks / web search | `SOPHON_GOOGLE_*`, `SOPHON_BOOKMARKS_PATH`, `SOPHON_GOOGLE_CSE_*`, `SOPHON_SEARXNG_URL`, `SOPHON_SEARCH_CONTACT` | See [docs/integrations/google/README.md](../integrations/google/README.md) and [docs/integrations/search/README.md](../integrations/search/README.md) |
 | Overleaf Git list / read | `SOPHON_OVERLEAF_*` | See [docs/integrations/overleaf/README.md](../integrations/overleaf/README.md) |
 
 Restart the TUI after `.env` changes. From WSL, copy `.env` with `sophon-cli deploy-windows --skip-venv`, then `.\scripts\start-sophon-chat.ps1` on Windows. No need to reinstall autostart.
+
+### Troubleshooting: Windows Terminal 0x8007010b
+
+`error 2147942667 (0x8007010b)` / `Could not access starting directory` means the **sophon** profile `startingDirectory` no longer exists (the Windows leftover tree was removed). Recreate it from the WSL checkout:
+
+```bash
+./scripts/deploy-windows.sh --sync-venv
+```
+
+That rsyncs source onto `C:\Software\Python\NLP\Personal\sophon` (or `SOPHON_WINDOWS_ROOT`), rewrites the Windows Terminal profile, and runs `uv sync` on Windows if `sophon-cli.exe` is missing.
+
+If the folder already exists and only the profile is stale:
+
+```bash
+./scripts/deploy-windows.sh --profile-only
+```
+
+Then:
+
+```powershell
+cd C:\Software\Python\NLP\Personal\sophon
+.\scripts\start-sophon-chat.ps1 -Foreground
+```
+
+Do not `uv sync` from WSL and Windows in the same directory. Two trees, two venvs.
 
 #### Remaining ideas (need a new tile later; suggested env names)
 

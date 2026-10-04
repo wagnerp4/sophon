@@ -5,6 +5,7 @@ from typing import Any
 
 from cli.tui.tiles.crypto import CryptoTile
 from cli.tui.tiles.hardware import HardwareTile
+from cli.tui.tiles.jobs import JobsTile
 from cli.tui.tiles.host import HostTile
 from cli.tui.tiles.markets import MarketsTile
 from cli.tui.tiles.metals import MetalsTile
@@ -20,6 +21,7 @@ from cli.tui.tiles.weather import WeatherTile
 
 _BUILTIN: dict[str, Any] = {
     "host": HostTile,
+    "jobs": JobsTile,
     "weather": WeatherTile,
     "system": SystemTile,
     "gpu": SystemTile,
@@ -46,6 +48,7 @@ DEFAULT_TILES = (
     "news",
     "polymarket",
     "twitch",
+    "jobs",
 )
 
 

@@ -5,8 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sophon"
 version = "0.1.0"
-description = "Utilities around Gemma 4 Hub weights (uv-managed)."
+description = "Local-first terminal harness: Textual TUI, chat, editor, and dashboard."
 requires-python = ">=3.10"
+license = { text = "MIT" }
+readme = "README.md"
+authors = [{ name = "wagnerp4" }]
+urls = { Homepage = "https://wagnerp4.github.io/sophon/", Repository = "https://github.com/wagnerp4/sophon", Issues = "https://github.com/wagnerp4/sophon/issues" }
 dependencies = [
     "accelerate>=1.12.0",
     "bitsandbytes>=0.45.0",
@@ -77,6 +81,7 @@ packages = [
     "sophon.backend.hf",
     "sophon.backend.ollama",
     "sophon.backend.lmstudio",
+    "sophon.backend.energy",
     "sophon.cli",
     "sophon.cli.backends",
     "sophon.cli.flags",
@@ -92,6 +97,9 @@ packages = [
     "sophon.integrations.zotero",
     "sophon.integrations.shell",
     "sophon.integrations.google",
+    "sophon.integrations.github",
+    "sophon.integrations.search",
+    "sophon.integrations.mcp",
     "sophon.integrations.overleaf",
     "sophon.processing",
     "sophon.processing.audio",
@@ -108,6 +116,7 @@ packages = [
     "sophon.cli.tui.widgets",
     "sophon.harness",
     "sophon.harness.subagent",
+    "sophon.harness.tools",
     "sophon.utils",
     "sophon.utils.device",
     "sophon.utils.download",
@@ -118,6 +127,9 @@ packages = [
     "sophon.training.finetune.backends",
     "sophon.training.pretraining",
 ]
+
+[tool.setuptools.package-data]
+"sophon.backend.energy" = ["*.yaml"]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

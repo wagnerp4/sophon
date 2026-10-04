@@ -3,6 +3,7 @@ from __future__ import annotations
 from cli.tui.tiles.base import TileState
 from cli.tui.tiles.crypto import CryptoTile
 from cli.tui.tiles.hardware import HardwareTile
+from cli.tui.tiles.jobs import JobsTile
 from cli.tui.tiles.host import HostTile, format_host_snapshot
 from cli.tui.tiles.markets import MarketsTile
 from cli.tui.tiles.metals import MetalsTile
@@ -20,6 +21,7 @@ from cli.tui.tiles.weather import WeatherTile
 __all__ = [
     "CryptoTile",
     "HardwareTile",
+    "JobsTile",
     "HostTile",
     "MarketsTile",
     "MetalsTile",

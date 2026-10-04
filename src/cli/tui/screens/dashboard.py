@@ -51,6 +51,9 @@ class DashboardScreen(ModeNavigationMixin, Screen):
             notes.update(f"[dim]unknown tiles skipped: {', '.join(self._unknown)}[/dim]")
         else:
             notes.update("[dim]Ctrl+E editor · Ctrl+G chat · Ctrl+H cycle · F4 layout[/dim]")
+        from cli.tui.keybinds import refresh_keybind_surfaces
+
+        refresh_keybind_surfaces(self.app)
         self._apply_dash_layout()
         for tile in self._tiles:
             self._schedule_tile(tile)

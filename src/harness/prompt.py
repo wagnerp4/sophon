@@ -4,6 +4,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from harness.approval import DECISION_DENY, DECISION_ONCE, DECISION_PERSIST, PermissionRequest
+from cli.key_prompt import redact_secrets
 
 if TYPE_CHECKING:
     from harness.gate import Harness
@@ -15,26 +16,57 @@ _CHOICES = {
 }
 
 
-def format_permission_prompt(request: PermissionRequest) -> str:
-    persist = ", ".join(request.persist_rules) if request.persist_rules else request.tool
+def format_permission_prompt(
+    request: PermissionRequest,
+    *,
+    once: str = "1",
+    persist: str = "2",
+    deny: str = "3",
+) -> str:
+    persist_rules = ", ".join(request.persist_rules) if request.persist_rules else request.tool
     lines = [
         f"Allow {request.tool}?",
         f"cwd: {request.cwd or '-'}",
         f"workspace: {request.workspace or '-'}",
-        f"detail: {request.summary or '-'}",
-        f"2 will add: {persist}",
-        "1 allow this time",
-        "2 add command to allow-list",
-        "3 decline",
+        f"detail: {redact_secrets(request.summary or '-')}",
+        f"{persist} will add: {redact_secrets(persist_rules)}",
+        f"{once} allow this time",
+        f"{persist} add command to allow-list",
+        f"{deny} decline",
         "On Windows the command is PowerShell. Option 2 stores a prefix, not the full line.",
+        "Left and right move. Enter confirms.",
     ]
     if request.reason:
         lines.insert(1, f"reason: {request.reason}")
     return "\n".join(lines)
 
 
+def _permission_choice_map() -> dict[str, str]:
+    try:
+        from cli.tui.keybinds import permission_keys
+    except Exception:
+        return dict(_CHOICES)
+    mapping = {
+        "permission_once": DECISION_ONCE,
+        "permission_persist": DECISION_PERSIST,
+        "permission_deny": DECISION_DENY,
+    }
+    out: dict[str, str] = {}
+    for action, decision in mapping.items():
+        key = str(permission_keys().get(action, "") or "").strip().lower()
+        if key:
+            out[key] = decision
+    for key, decision in _CHOICES.items():
+        out.setdefault(key, decision)
+    return out
+
+
 def prompt_stdio(request: PermissionRequest) -> str:
-    text = format_permission_prompt(request)
+    choices = _permission_choice_map()
+    once = next((key for key, decision in choices.items() if decision == DECISION_ONCE), "1")
+    persist = next((key for key, decision in choices.items() if decision == DECISION_PERSIST), "2")
+    deny = next((key for key, decision in choices.items() if decision == DECISION_DENY), "3")
+    text = format_permission_prompt(request, once=once, persist=persist, deny=deny)
     try:
         tty = bool(sys.stdin.isatty())
     except Exception:
@@ -42,14 +74,15 @@ def prompt_stdio(request: PermissionRequest) -> str:
     if not tty:
         return DECISION_DENY
     print(text, file=sys.stderr, flush=True)
+    hint = "/".join(dict.fromkeys((once, persist, deny)))
     while True:
         try:
-            raw = input("permission [1/2/3]: ").strip()
+            raw = input(f"permission [{hint}]: ").strip().lower()
         except EOFError:
             return DECISION_DENY
-        if raw in _CHOICES:
-            return _CHOICES[raw]
-        print("enter 1, 2, or 3", file=sys.stderr, flush=True)
+        if raw in choices:
+            return choices[raw]
+        print("enter " + hint, file=sys.stderr, flush=True)
 
 
 def harness_system_hint(harness: "Harness") -> str:

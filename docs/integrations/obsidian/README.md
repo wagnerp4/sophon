@@ -79,4 +79,5 @@ Set `SOPHON_VAULT_PATH` to the vault filesystem root. In Editor, **View → Vaul
 
 - sophon does **not** speak MCP over stdio for Phase 1. It uses HTTP Local REST API so the TUI stays simple.
 - LM Studio app chat uses MCP Host. sophon chat uses REST tools. Same vault, two clients.
+- Closing that gap (sophon chat as MCP client, native `vault_*` dropped from the model schema while the server is live, slash commands kept) is specified in [mcp/README.md](../mcp/README.md).
 - Passing LM Studio API `integrations` from sophon is out of scope for this setup.

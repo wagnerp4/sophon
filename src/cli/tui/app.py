@@ -81,6 +81,7 @@ from cli.tui.chat_prompt import FilesDropped
 from cli.tui.keybinds import CHAT_KEYBIND_ACTIONS, SlashDispatchMixin, apply_keybinds, load_keybinds
 from cli.path_highlights import ensure_highlights_file
 from cli.tui.permission import PermissionPrompt
+from cli.tui.choice import ChoicePrompt
 from cli.tui.setup_prompt import SETUP_SKIP, SetupPrompt
 from cli.tui.speech import ChatLogPane, ChatTranscript, PushToTalkMixin, TranscriptHostMixin
 from utils.device.env_bootstrap import sophon_project_root
@@ -382,6 +383,9 @@ class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeN
             load_keybinds(sophon_project_root()),
             actions=CHAT_KEYBIND_ACTIONS,
         )
+        from cli.tui.keybinds import refresh_keybind_surfaces
+
+        refresh_keybind_surfaces(self.app)
 
     def _tick_action_elapsed(self) -> None:
         app = self.app
@@ -676,26 +680,37 @@ class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeN
         self.app.exit()
 
     def action_show_help(self) -> None:
+        from cli.tui.keybinds import load_keybinds
+
+        binds = load_keybinds(sophon_project_root())
+        actions = binds.actions
         self._append_system("Key bindings")
-        for key, description in (
+        rows = (
             ("f1", "Show slash commands and key bindings"),
-            ("ctrl+m", "Open model picker (/models)"),
-            ("ctrl+d", "Open dashboard"),
-            ("ctrl+e", "Open editor (project tree · .py / .md / .svg / .stl / tables / .ipynb / .pdf / images)"),
-            ("ctrl+g", "Open nexus"),
-            ("right", "Editor: accept autocomplete suggestion"),
-            ("ctrl+b", "Editor: toggle project pane"),
-            ("ctrl+j", "Editor: toggle lower panel"),
-            ("ctrl+h", "Cycle dashboard / editor / chat"),
-            ("ctrl+shift+t", "Focus chat log"),
-            ("ctrl+l", "Speak: click to start, click Stop to finish. Hold Speak to talk, release to stop"),
-            ("ctrl+y", "Copy full chat log to clipboard"),
-            ("copy", "Footer Copy button — same as Ctrl+Y"),
+            (actions.get("open_models") or "ctrl+m", "Open model picker (/models)"),
+            (actions.get("open_dashboard") or "ctrl+d", "Open dashboard"),
+            (actions.get("open_editor") or "ctrl+e", "Open editor"),
+            (actions.get("open_chat") or "ctrl+g", "Open nexus"),
+            (actions.get("accept_completion") or "right", "Editor: accept autocomplete suggestion"),
+            (actions.get("toggle_project") or "ctrl+b", "Editor: toggle project pane"),
+            (actions.get("toggle_aux") or "ctrl+j", "Editor: toggle lower panel"),
+            (actions.get("cycle_mode") or "ctrl+h", "Cycle dashboard / editor / chat"),
+            (actions.get("cycle_tree") or "ctrl+shift+t", "Cycle editor tree"),
+            (actions.get("listen") or "ctrl+l", "Speak: click to start, click Stop to finish"),
+            (actions.get("copy_chat") or "ctrl+y", "Copy full chat log to clipboard"),
+            ("copy", "Footer Copy button"),
             ("ctrl+q", "Exit the TUI (/quit also works)"),
             ("tab", "Switch focus between chat log and input"),
             ("escape", "Return focus to the message input"),
-        ):
-            self._append_system(f"  {key:<10} {description}")
+            (actions.get("permission_once") or "1", "Harness permission: allow this time"),
+            (actions.get("permission_persist") or "2", "Harness permission: allow-list"),
+            (actions.get("permission_deny") or "3", "Harness permission: decline"),
+        )
+        for key, description in rows:
+            shown = str(key or "").strip()
+            if not shown:
+                continue
+            self._append_system(f"  {shown:<16} {description}")
         self._append_system("Slash commands")
         for line in format_chat_help().splitlines():
             self._append_system(line)
@@ -769,6 +784,15 @@ class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeN
         self._append_user(line)
         self._append_system("(model picker — ↑↓ / click · Enter · Esc)")
         self._open_model_picker()
+        return True
+
+    def _handle_jobs_queue(self, line: str) -> bool:
+        if line.strip() not in ("/jobs", "/jobs queue"):
+            return False
+        from cli.tui.screens.jobs_queue import JobQueueScreen
+
+        self._append_user(line)
+        self.app.push_screen(JobQueueScreen())
         return True
 
     def _prompt_download(self, entry: ModelPickerEntry) -> None:
@@ -903,12 +927,21 @@ class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeN
             return
         if self._handle_models_command(line):
             return
+        if self._handle_jobs_queue(line):
+            return
         if self.sst_recording() and not line.strip().lower().startswith("/listen"):
             self._cancel_sst_mic()
 
         send_line = line
         dropped = list(self._dropped_paths)
         state = app.session_state
+        from cli.key_prompt import take_pending_secret
+
+        secret_note = take_pending_secret(state, line)
+        if secret_note is not None:
+            self._append_system(secret_note)
+            self.call_after_refresh(self._focus_prompt)
+            return
         if dropped and paths_still_in_text(line, dropped) and not line.strip().startswith("/") and line.strip() != "!":
             if bool(getattr(state, "auto_attach", True)):
                 send_line = build_message_with_attachments(line, dropped)
@@ -2095,6 +2128,68 @@ class SophonTuiApp(App):
             except Exception:
                 return SETUP_SKIP
 
+        def on_choice(title: str, options: list, timeout_s: float | None) -> str | None:
+            future: Future[str | None] = Future()
+
+            def _show() -> None:
+                def _done(choice: str | None) -> None:
+                    if not future.done():
+                        future.set_result(choice)
+
+                self.push_screen(ChoicePrompt(str(title), list(options), timeout_s), _done)
+
+            self._call_on_app_thread(_show)
+            try:
+                return future.result()
+            except Exception:
+                return None
+
+        def on_pick_model(backend: str) -> str | None:
+            state = self.session_state
+            if state is None:
+                return None
+            entries = [
+                entry
+                for entry in build_model_picker_entries(state)
+                if entry.group == backend
+            ]
+            if not any(entry.kind != "header" for entry in entries):
+                return None
+            future: Future[str | None] = Future()
+
+            def _show() -> None:
+                def _done(entry: ModelPickerEntry | None) -> None:
+                    if future.done():
+                        return
+                    if entry is None or entry.kind == "header" or not entry.target:
+                        future.set_result(None)
+                        return
+                    target = entry.target
+                    name = target.split(":", 1)[1] if ":" in target else target
+                    future.set_result(name)
+
+                self.push_screen(ModelPickerScreen(entries), _done)
+
+            self._call_on_app_thread(_show)
+            try:
+                return future.result()
+            except Exception:
+                return None
+
+        def on_keybinds_reload() -> None:
+            from cli.tui.keybinds import refresh_keybind_surfaces
+
+            def _show() -> None:
+                refresh_keybind_surfaces(self)
+
+            self._call_on_app_thread(_show)
+
+        def on_keybinds_edit(path: str) -> None:
+            def _show() -> None:
+                self.run_worker(self._open_keybinds_file(path), exclusive=True)
+
+            self._call_on_app_thread(_show)
+
         return ChatIo(
             emit=emit,
             on_assistant=on_assistant,
@@ -2106,6 +2201,10 @@ class SophonTuiApp(App):
             on_heartbeat_end=on_heartbeat_end,
             on_permission=on_permission,
             on_setup_choice=on_setup_choice,
+            on_choice=on_choice,
+            on_pick_model=on_pick_model,
+            on_keybinds_reload=on_keybinds_reload,
+            on_keybinds_edit=on_keybinds_edit,
         )
 
     def _apply_mic_phase(self, phase: str) -> None:
@@ -2307,6 +2406,13 @@ class SophonTuiApp(App):
         self._apply_window_title(EDITOR_TITLE)
         await self.switch_mode("editor")
         self.call_after_refresh(self.refresh_active_screen)
+
+    async def _open_keybinds_file(self, path: str) -> None:
+        await self.open_editor()
+        screen = self.screen
+        opener = getattr(screen, "_request_open_path", None)
+        if callable(opener):
+            opener(Path(path))
 
     async def open_chat(self) -> None:
         self._apply_window_title(CHAT_TITLE)

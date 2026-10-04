@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sophon — nexus</title>
+  <meta name="description" content="sophon is a local-first terminal harness. Nexus is the working surface: dashboard, editor, chat.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <p class="kicker">nexus</p>
+    <h1>sophon</h1>
+    <p class="lead">
+      A local-first terminal harness. One process for dashboard, editor, and model chat.
+      The rest of the map is still in flux. This page stays thin on purpose.
+    </p>
+
+    <section>
+      <h2>Install</h2>
+      <p>
+        Entry point is <code>sophon-cli</code>. Until a PyPI release exists, clone the repo
+        and use <a href="https://docs.astral.sh/uv/">uv</a>.
+      </p>
+      <pre><code>git clone https://github.com/wagnerp4/sophon.git
+cd sophon
+uv sync --extra tui --extra finetune
+cp .env.example .env
+.venv/bin/sophon-cli chat --no-spawn-window</code></pre>
+      <p>From a checkout without a venv path prefix, the same command is <code>sophon-cli</code> after <code>uv sync</code>.</p>
+    </section>
+
+    <section>
+      <h2>Platforms</h2>
+      <ul>
+        <li>
+          <strong>Linux (Arch / Omarchy, single tree).</strong>
+          One checkout. Do not set <code>SOPHON_WINDOWS_ROOT</code>.
+          Run in the current TTY with <code>--no-spawn-window</code>, or a REPL:
+          <code>sophon-cli chat --interface repl</code>.
+        </li>
+        <li>
+          <strong>Windows (two trees).</strong>
+          Edit in WSL, deploy a GPU copy with
+          <code>sophon-cli deploy-windows</code>.
+          If Windows Terminal reports <code>0x8007010b</code>, the deploy folder is gone.
+          Recreate it from WSL. Details:
+          <a href="https://github.com/wagnerp4/sophon/blob/main/README.md">README</a>.
+        </li>
+        <li>
+          <strong>Headless.</strong>
+          <code>sophon-cli chat --interface repl</code> does not need a desktop emulator.
+        </li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Standalone binary</h2>
+      <p>
+        Coming later. A PyInstaller/Nuitka build would ship Torch and Transformers.
+        Size is the blocker. Public install stays git + uv until then.
+      </p>
+    </section>
+
+    <section>
+      <h2>Not yet</h2>
+      <p>
+        Swarms, a full product map, and a named catalog of agents are not documented here.
+        Contributors can read
+        <a href="https://github.com/wagnerp4/sophon/blob/main/docs/VISION.md">VISION.md</a>.
+      </p>
+    </section>
+
+    <footer>
+      <a href="https://github.com/wagnerp4/sophon">github.com/wagnerp4/sophon</a>
+    </footer>
+  </main>
+</body>
+</html>
