@@ -1,143 +1,110 @@
-from typing import Any
+from __future__ import annotations
+
 import json
-import subprocess
-import sys
+from typing import Any
+
+from integrations.arxiv.client import arxiv_tools_enabled
+from integrations.search.arxiv import _ENDPOINT, SOURCE, parse_arxiv_atom
+from integrations.search.http import fetch_text, url_with_query
+
+ARXIV_SEARCH = "arxiv_search"
+ARXIV_GET_PAPER = "arxiv_get_paper"
+ARXIV_TOOL_NAMES = frozenset({ARXIV_SEARCH, ARXIV_GET_PAPER})
 
 ARXIV_TOOL_SYSTEM_HINT = (
-    "Use arxiv_search to find research papers by topic, author, or keyword. "
-    "Use arxiv_get_paper for detailed information about a specific paper by ID."
+    "Use arxiv_search to find preprints on arXiv by topic, title or author "
+    "(prefixes ti:, au:, abs:, cat: are supported). Use arxiv_get_paper with an arXiv id "
+    "such as 2306.04338 for one paper's abstract and PDF link. Use zotero_* for the user's own library."
 )
 
-ARXIV_TOOL_NAMES = {"arxiv_search", "arxiv_get_paper"}
+ARXIV_SEARCH_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": ARXIV_SEARCH,
+        "description": "Search arXiv for papers. Returns id, title, authors, year, abstract and URL.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search phrase, or arXiv syntax like 'au:Bengio' or 'ti:attention'.",
+                },
+                "limit": {"type": "integer", "description": "Max hits (default 10, max 50)."},
+            },
+            "required": ["query"],
+        },
+    },
+}
 
-
-def _call_arxiv_server(method: str, **params) -> dict[str, Any]:
-    """Call the arxiv MCP server."""
-    try:
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                ".mcp/arxiv_server.py",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd="/home/philipp/software/python/Signal Processing/NLP/Personal/sophon",
-        )
-        request = json.dumps({"method": method, "params": params})
-        stdout, stderr = process.communicate(input=request, timeout=30)
-
-        if stderr:
-            return {"error": f"Server error: {stderr}"}
-
-        response = json.loads(stdout)
-        return response.get("result", response)
-    except json.JSONDecodeError as e:
-        return {"error": f"Invalid server response: {e}"}
-    except subprocess.TimeoutExpired:
-        return {"error": "arxiv server timeout"}
-    except Exception as e:
-        return {"error": f"arxiv server error: {e}"}
-
-
-def arxiv_search(query: str, max_results: int = 10) -> dict[str, Any]:
-    """Search arXiv for papers matching the query.
-
-    Args:
-        query: Search query (keywords, author, title)
-        max_results: Maximum number of results (default 10)
-
-    Returns:
-        List of papers with title, authors, abstract, PDF URL, etc.
-    """
-    if not query or not query.strip():
-        return {"error": "Query cannot be empty"}
-
-    result = _call_arxiv_server("search", query=query, max_results=min(max_results, 100))
-
-    if isinstance(result, list):
-        return {
-            "count": len(result),
-            "papers": result
-        }
-    return result
-
-
-def arxiv_get_paper(paper_id: str) -> dict[str, Any]:
-    """Get detailed information about a specific paper.
-
-    Args:
-        paper_id: arXiv paper ID (e.g., "2306.04338v1" or "http://arxiv.org/abs/2306.04338v1")
-
-    Returns:
-        Paper details including title, authors, abstract, PDF URL, publication date.
-    """
-    if not paper_id or not paper_id.strip():
-        return {"error": "Paper ID cannot be empty"}
-
-    # Extract just the ID if a full URL was provided
-    if "arxiv.org" in paper_id:
-        paper_id = paper_id.split("/abs/")[-1]
-
-    return _call_arxiv_server("get", paper_id=paper_id)
+ARXIV_GET_PAPER_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": ARXIV_GET_PAPER,
+        "description": "Fetch one arXiv paper by id: title, authors, abstract, abs and PDF links.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "paper_id": {
+                    "type": "string",
+                    "description": "arXiv id like '2306.04338' or '2306.04338v1', or an arxiv.org URL.",
+                },
+            },
+            "required": ["paper_id"],
+        },
+    },
+}
 
 
 def arxiv_chat_tools() -> list[dict[str, Any]]:
-    """Return arxiv tools for chat."""
-    return [
-        {
-            "name": "arxiv_search",
-            "description": "Search arXiv for research papers by topic, author, or keyword",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query (e.g., 'transformer models', 'author:Bengio', 'title:neural networks')",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of results (1-100, default 10)",
-                        "default": 10,
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-        {
-            "name": "arxiv_get_paper",
-            "description": "Get detailed information about a specific arXiv paper by ID",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "paper_id": {
-                        "type": "string",
-                        "description": "arXiv paper ID (e.g., '2306.04338v1' or full URL)",
-                    },
-                },
-                "required": ["paper_id"],
-            },
-        },
-    ]
+    if not arxiv_tools_enabled():
+        return []
+    return [ARXIV_SEARCH_TOOL, ARXIV_GET_PAPER_TOOL]
 
 
-def execute_arxiv_tool(name: str, args: dict[str, Any]) -> str:
-    """Execute an arxiv tool by name."""
-    try:
-        if name == "arxiv_search":
-            query = str(args.get("query", ""))
-            max_results = int(args.get("max_results", 10))
-            result = arxiv_search(query, max_results)
-        elif name == "arxiv_get_paper":
-            paper_id = str(args.get("paper_id", ""))
-            result = arxiv_get_paper(paper_id)
-        else:
-            return f"error: unknown arxiv tool '{name}'"
+def _hit_payload(hit) -> dict[str, Any]:
+    arxiv_id = hit.extras.get("id", "")
+    return {
+        "id": arxiv_id,
+        "title": hit.title,
+        "authors": hit.extras.get("authors", ""),
+        "year": hit.extras.get("year", ""),
+        "abstract": hit.snippet,
+        "url": hit.url,
+        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "",
+    }
 
-        if isinstance(result, dict) and "error" in result:
-            return f"error: {result['error']}"
 
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        return f"error: {str(e)}"
+def _normalize_id(raw: str) -> str:
+    value = raw.strip()
+    for marker in ("/abs/", "/pdf/"):
+        if marker in value:
+            value = value.split(marker, 1)[1]
+    return value.removesuffix(".pdf").strip("/")
+
+
+def execute_arxiv_tool(name: str, arguments: dict[str, Any]) -> str:
+    if name == ARXIV_SEARCH:
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            return "error: query is required"
+        try:
+            limit = max(1, min(int(arguments.get("limit") or 10), 50))
+        except (TypeError, ValueError):
+            limit = 10
+        hits = SOURCE.search(query, limit)
+        return json.dumps({"count": len(hits), "papers": [_hit_payload(h) for h in hits]}, ensure_ascii=False)
+    if name == ARXIV_GET_PAPER:
+        paper_id = _normalize_id(str(arguments.get("paper_id") or ""))
+        if not paper_id:
+            return "error: paper_id is required"
+        xml_text = fetch_text(
+            url_with_query(_ENDPOINT, {"id_list": paper_id, "max_results": 1}),
+            source=SOURCE.name,
+            min_interval_s=SOURCE.min_interval_s,
+            headers={"Accept": "application/atom+xml, application/xml, text/xml, */*"},
+        )
+        hits = parse_arxiv_atom(xml_text, limit=1)
+        if not hits:
+            return f"error: no arXiv paper found for id {paper_id!r}"
+        return json.dumps(_hit_payload(hits[0]), ensure_ascii=False)
+    return f"error: unknown arxiv tool {name!r}"

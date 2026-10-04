@@ -2974,17 +2974,14 @@ def _cmd_arxiv_status(state: _SessionState, _arg: str) -> bool:
     from integrations.arxiv.client import arxiv_tools_enabled
 
     enabled = arxiv_tools_enabled()
-    _emit(f"arxiv tools: {'on' if enabled else 'off'}")
+    _emit(f"arxiv tools: {'on' if enabled else 'off'} (SOPHON_ARXIV_TOOLS, default on)")
     if not enabled:
-        _emit("arxiv server not found at .mcp/arxiv_server.py")
         return False
     try:
-        from integrations.arxiv.tools import arxiv_search
-        result = arxiv_search("test", max_results=1)
-        if "error" in result:
-            _emit(f"reachable: no ({result['error']})")
-        else:
-            _emit("reachable: yes")
+        from integrations.search.arxiv import SOURCE
+
+        hits = SOURCE.search("attention", 1)
+        _emit(f"reachable: yes ({len(hits)} hit)")
     except Exception as exc:
         _emit(f"reachable: no ({exc})")
     return False
@@ -3335,7 +3332,7 @@ def _cmd_tools(state: _SessionState, _arg: str) -> bool:
     _emit(f"dotenv: {DOTENV_LOAD_PATH if DOTENV_LOAD_PATH else '(not loaded)'}")
     _emit(f"speak tool: {'on' if tts_on else 'off'} (SOPHON_TTS_TOOL)")
     _emit(f"transcribe tool: {'on' if sst_on else 'off'} (SOPHON_SST_TOOL)")
-    _emit(f"arxiv tools: {'on' if arxiv_on else 'off'}")
+    _emit(f"arxiv tools: {'on' if arxiv_on else 'off'} (SOPHON_ARXIV_TOOLS)")
     _emit(f"vault tools: {'on' if obs_on else 'off'} (SOPHON_OBSIDIAN_TOOLS)")
     _emit(f"zotero tools: {'on' if zot_on else 'off'} (SOPHON_ZOTERO_TOOLS, default on if library reachable)")
     _emit(
@@ -3500,6 +3497,60 @@ def _cmd_permissions(state: _SessionState, arg: str) -> bool:
         harness.reload()
         _emit("(harness policy reloaded)")
     _emit(harness.describe())
+    return False
+
+
+@_register("sandbox", "Shell sandbox: /sandbox [full|workspace-write|read-only|vm]. vm runs shell_exec in a QEMU VM.")
+def _cmd_sandbox(state: _SessionState, arg: str) -> bool:
+    from harness import ensure_harness
+
+    harness = ensure_harness(state)
+    token = arg.strip().lower()
+    if not token:
+        _emit(f"sandbox: {harness.sandbox}")
+        _emit("usage: /sandbox [full|workspace-write|read-only|vm]")
+        return False
+    try:
+        value = harness.set_sandbox(token)
+    except ValueError as exc:
+        _emit(f"error: {exc}")
+        return False
+    _emit(f"(sandbox = {value})")
+    if value == "vm":
+        os.environ["SOPHON_SHELL_TOOLS"] = "1"
+        _emit("shell tools: on for this session; shell_exec runs inside the VM without permission prompts")
+        _cmd_vm(state, "up")
+    return False
+
+
+@_register("vm", "Sandbox VM: /vm [status|up|wait|down|reset|setup|ssh|exec CMD].")
+def _cmd_vm(state: _SessionState, arg: str) -> bool:
+    from integrations.shell.vm import VM_HOME, vm_control, vm_exec
+
+    action, _, rest = arg.strip().partition(" ")
+    action = action.lower() or "status"
+    if action == "exec":
+        if not rest.strip():
+            _emit("usage: /vm exec COMMAND")
+            return False
+        session = state.shell_session
+        cwd = str(getattr(session, "vm_cwd", "") or VM_HOME)
+        code, output = vm_exec(rest, cwd=cwd, timeout_s=120)
+        _emit(output)
+        _emit(f"(exit {code})")
+        return False
+    timeouts = {"setup": 900.0, "wait": 960.0, "down": 60.0, "reset": 90.0}
+    if action not in ("status", "up", "wait", "down", "reset", "setup", "ssh"):
+        _emit("usage: /vm [status|up|wait|down|reset|setup|ssh|exec CMD]")
+        return False
+    if action in ("setup", "wait"):
+        _emit(f"(vm {action}: this can take several minutes)")
+    _code, output = vm_control(action, timeout_s=timeouts.get(action, 120.0))
+    _emit(output)
+    if action == "up":
+        _emit("(booting in the background; /vm status shows when ssh is ready)")
+    if action == "ssh":
+        _emit("(run that in a WSL terminal for an interactive shell)")
     return False
 
 

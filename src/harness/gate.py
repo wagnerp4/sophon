@@ -59,6 +59,7 @@ class Harness:
     project_root: Path
     policy: Policy
     mode_override: str | None = None
+    sandbox_override: str | None = None
     session_allow: list[str] = field(default_factory=list)
 
     @property
@@ -71,7 +72,19 @@ class Harness:
     def sandbox(self) -> str:
         from integrations.shell.sandbox import normalize_sandbox
 
+        if self.sandbox_override:
+            return self.sandbox_override
         return normalize_sandbox(getattr(self.policy, "sandbox", "full"))
+
+    def set_sandbox(self, sandbox: str) -> str:
+        from integrations.shell.sandbox import SANDBOX_MODES, normalize_sandbox
+
+        token = str(sandbox or "").strip().lower()
+        value = normalize_sandbox(token)
+        if value != token and token not in ("readonly", "workspace", "qemu"):
+            raise ValueError(f"sandbox must be one of: {', '.join(SANDBOX_MODES)}")
+        self.sandbox_override = value
+        return value
 
     def set_mode(self, mode: str) -> str:
         token = str(mode or "").strip().lower()
@@ -186,6 +199,8 @@ class Harness:
             return AuthResult.ask(request, reason="ask rule")
         if _matches_allow(self.policy.allow + self.session_allow, tool, command=command, target=target):
             return AuthResult.allow("allow rule")
+        if tool == "shell_exec" and self.sandbox == "vm":
+            return AuthResult.allow("vm sandbox")
         if tool == "shell_exec":
             request.reason = "shell_exec"
             return AuthResult.ask(request, reason="shell_exec")

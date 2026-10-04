@@ -99,6 +99,15 @@ def harness_system_hint(harness: "Harness") -> str:
             f"Harness mode is chat. Workspace is {workspace}. "
             "Answer from context and read tools. Do not run shell_exec or propose edits."
         )
+    if harness.sandbox == "vm":
+        return (
+            f"Harness sandbox is vm. Workspace is {workspace}. "
+            "shell_exec runs inside a disposable Ubuntu 22.04 VM as user sophon (passwordless sudo, "
+            "starting in /home/sophon/work), not on the user's machine. Use bash syntax there. "
+            "You may install packages, write files and run programs inside the VM freely; the user can reset it. "
+            "The VM cannot see the host workspace: shell_ls/shell_read still read host files. "
+            "Changes to the user's project still go through editor_propose_edit."
+        )
     return (
         f"Harness policy is in effect. Workspace is {workspace}. "
         "File writes go through editor_propose_edit and wait for Review. "

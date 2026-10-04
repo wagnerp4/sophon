@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SANDBOX_MODES = ("read-only", "workspace-write", "full")
+SANDBOX_MODES = ("read-only", "workspace-write", "full", "vm")
 
 
 def normalize_sandbox(value: object) -> str:
@@ -15,8 +15,8 @@ def normalize_sandbox(value: object) -> str:
         return "read-only"
     if token in ("workspace-write", "workspace"):
         return "workspace-write"
-    if token == "full":
-        return "full"
+    if token in ("vm", "qemu"):
+        return "vm"
     return "full"
 
 

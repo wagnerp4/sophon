@@ -167,6 +167,8 @@ def tool_api_label(name: str) -> str:
         "zotero_list": "zotero collection items",
         "zotero_read": "zotero item read",
         "zotero_metrics": "zotero library metrics",
+        "arxiv_search": "arxiv export API query",
+        "arxiv_get_paper": "arxiv export API id_list",
         "shell_pwd": "shell cwd",
         "shell_cd": "shell chdir",
         "shell_ls": "shell listdir",

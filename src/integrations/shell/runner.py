@@ -76,16 +76,33 @@ class ShellSession:
         return ShellResult(exit_code=1, output=msg, cwd=self.cwd, handled_as_cd=True)
 
     def run(self, command: str, *, timeout_s: float | None = None) -> ShellResult:
+        timeout = shell_timeout_s() if timeout_s is None else max(1.0, float(timeout_s))
+        mode = str(getattr(self, "sandbox_mode", "full") or "full")
+        if mode == "vm":
+            return self._run_vm(command, timeout_s=timeout)
         cd = self.handle_cd_command(command)
         if cd is not None:
             return cd
-        timeout = shell_timeout_s() if timeout_s is None else max(1.0, float(timeout_s))
-        mode = str(getattr(self, "sandbox_mode", "full") or "full")
         if mode in ("read-only", "workspace-write"):
             return self._run_sandboxed(command, timeout_s=timeout, mode=mode)
         if sys.platform == "win32":
             return self._run_windows(command, timeout_s=timeout)
         return self._run_unix(command, timeout_s=timeout)
+
+    def _run_vm(self, command: str, *, timeout_s: float) -> ShellResult:
+        from integrations.shell.vm import VM_HOME, vm_exec
+
+        vm_cwd = str(getattr(self, "vm_cwd", "") or VM_HOME)
+        parts = command.strip().split(maxsplit=1)
+        if parts and parts[0] == "cd":
+            target = parts[1] if len(parts) > 1 else "~"
+            code, output = vm_exec(f"cd {target} && pwd", cwd=vm_cwd, timeout_s=15)
+            if code == 0 and output.strip():
+                self.vm_cwd = output.strip().splitlines()[-1]
+                return ShellResult(exit_code=0, output=f"vm cwd -> {self.vm_cwd}", cwd=self.cwd, handled_as_cd=True)
+            return ShellResult(exit_code=code or 1, output=truncate_output(output), cwd=self.cwd, handled_as_cd=True)
+        code, output = vm_exec(command, cwd=vm_cwd, timeout_s=timeout_s)
+        return ShellResult(exit_code=code, output=truncate_output(output), cwd=self.cwd)
 
     def _run_sandboxed(self, command: str, *, timeout_s: float, mode: str) -> ShellResult:
         from integrations.shell.sandbox import (
