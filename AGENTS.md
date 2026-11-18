@@ -216,7 +216,7 @@ The human writes ideas. Agents turn each idea into a blueprint, review it in sep
 - The architect, before designing, traces every way the feature can be reached: entry points, launch modes (spawned window, `--no-spawn-window`, REPL, OS-specific launchers), and the state each path actually sets. Write down assumptions such as "cwd is the user's repo" and check them in the code.
 - If two or more reviewers raise the same major, the architect must consider splitting it out into its own item with `depends_on`, rather than growing the blueprint.
 - Findings about existing code that are outside the item's scope become new ideas, not blueprint scope.
-- A failed review sends the item back one stage with findings. After 3 rounds without passing, set `status: blocked` and write the open questions for the human.
+- A failed review sends the item back one stage with findings. In the next round, re-run only the phases that did not pass, unless the revision changes the design itself rather than folding in those reviewers' own minor findings. In that case, re-run all phases. After 3 rounds without passing, set `status: blocked` and write the open questions for the human.
 - Autonomy levels, set per repo in its `project.md`:
   - L0: the human also approves the blueprint (between G2 and stage 3).
   - L1: G2 approves the blueprint automatically, and the human sees only the PR.
