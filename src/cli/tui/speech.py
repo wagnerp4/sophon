@@ -597,7 +597,14 @@ class TranscriptHostMixin:
         app = getattr(self, "app", None)
         copy = getattr(app, "copy_to_clipboard", None)
         if callable(copy):
+            # Textual falls back to OSC 52, which many terminals honour.
             copy(payload)
+            if callable(notify):
+                notify(
+                    "Sent chat to the terminal clipboard (OSC 52). If paste is empty, "
+                    "install wl-clipboard (Wayland) or xclip (X11)."
+                )
+            return
         if callable(notify):
             notify("Could not copy chat to the system clipboard.")
 

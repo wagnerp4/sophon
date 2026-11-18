@@ -54,6 +54,35 @@ def copy_text_to_system_clipboard(text: str) -> bool:
             continue
         if completed.returncode == 0:
             return True
+    if sys.platform.startswith("linux") and _copy_via_klipper(text):
+        return True
+    return False
+
+
+# Linux caps a single argv string at MAX_ARG_STRLEN (128 KiB); stay below it.
+_KLIPPER_MAX_BYTES = 120_000
+
+
+def _copy_via_klipper(text: str) -> bool:
+    """KDE Plasma fallback when wl-clipboard/xclip/xsel are not installed."""
+    if len(text.encode("utf-8")) > _KLIPPER_MAX_BYTES:
+        return False
+    for tool in ("qdbus6", "qdbus", "qdbus-qt6", "qdbus-qt5"):
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        try:
+            completed = subprocess.run(
+                [exe, "org.kde.klipper", "/klipper", "setClipboardContents", text],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode == 0:
+            return True
     return False
 
 
