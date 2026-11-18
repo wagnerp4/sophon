@@ -81,6 +81,10 @@ packages = [
     "sophon.backend.hf",
     "sophon.backend.ollama",
     "sophon.backend.lmstudio",
+    "sophon.backend.openai",
+    "sophon.backend.anthropic",
+    "sophon.backend.google",
+    "sophon.backend.catalogs",
     "sophon.backend.energy",
     "sophon.cli",
     "sophon.cli.backends",
@@ -101,6 +105,8 @@ packages = [
     "sophon.integrations.search",
     "sophon.integrations.mcp",
     "sophon.integrations.overleaf",
+    "sophon.integrations.jobs",
+    "sophon.integrations.arxiv",
     "sophon.processing",
     "sophon.processing.audio",
     "sophon.processing.audio.speech",
@@ -110,6 +116,7 @@ packages = [
     "sophon.processing.text.memory",
     "sophon.processing.text.completion",
     "sophon.processing.text.completion.backends",
+    "sophon.processing.text.skills",
     "sophon.processing.text.retrieval",
     "sophon.processing.text.retrieval.backends",
     "sophon.processing.text.retrieval.corpus",
@@ -126,10 +133,12 @@ packages = [
     "sophon.training.finetune.datasets",
     "sophon.training.finetune.backends",
     "sophon.training.pretraining",
+    "sophon.training.orchestrator",
 ]
 
 [tool.setuptools.package-data]
 "sophon.backend.energy" = ["*.yaml"]
+"sophon.backend.catalogs" = ["*.json"]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
