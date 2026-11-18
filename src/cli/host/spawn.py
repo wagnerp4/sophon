@@ -161,6 +161,13 @@ def _spawn_native_linux(
             env=env,
             cwd=cwd,
         )
+    konsole = shutil.which("konsole")
+    if konsole:
+        return subprocess.Popen(
+            [konsole, "--workdir", cwd, "-p", f"tabtitle={window_title}", "-e", *command],
+            env=env,
+            cwd=cwd,
+        )
     gnome = shutil.which("gnome-terminal")
     if gnome:
         return subprocess.Popen(
@@ -204,7 +211,7 @@ def _spawn_linux(
     if native is not None:
         return native
     raise RuntimeError(
-        "No desktop terminal found (kitty, wezterm, or gnome-terminal). "
+        "No desktop terminal found (kitty, wezterm, konsole, or gnome-terminal). "
         "Run sophon-cli chat --no-spawn-window in this TTY. "
         "On WSL, sophon-cli deploy-windows then sophon-cli chat --windows."
     )
