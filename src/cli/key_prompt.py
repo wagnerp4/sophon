@@ -80,6 +80,9 @@ def normalize_secret(text: str) -> str:
 def contains_secret(text: str) -> bool:
     redacted = redact_secrets(text or "")
     return "[redacted]" in redacted
+
+
+def prompt_lines(key_id: str) -> list[str]:
     spec = KEY_PROMPTS.get(key_id)
     if spec is None:
         return [f"unknown key {key_id}"]
