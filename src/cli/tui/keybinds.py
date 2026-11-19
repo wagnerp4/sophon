@@ -330,6 +330,9 @@ def set_keybind(action: str, key: str, root: Path | None = None) -> str:
 
 def _atomic_write(path: Path, data: bytes) -> None:
     target = path.resolve()
+    if target.exists() and not os.access(target, os.W_OK):
+        # os.replace would silently swap out a read-only file; keep write_text's refusal.
+        raise PermissionError(13, "Permission denied", str(target))
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".keybinds.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as handle:

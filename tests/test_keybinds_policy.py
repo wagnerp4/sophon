@@ -486,10 +486,6 @@ class EditorWiringTests(unittest.TestCase):
         self.assertEqual(stub._keybinds_ignored, expected.ignored)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WriteModeTests(_Base):
     @unittest.skipIf(os.name != "posix", "POSIX file modes")
     def test_set_keybind_keeps_file_mode(self) -> None:
@@ -497,3 +493,18 @@ class WriteModeTests(_Base):
         path.chmod(0o644)
         self.assertEqual(kb.set_keybind("save_file", "ctrl+alt+o"), "")
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    @unittest.skipIf(os.name != "posix" or IS_ROOT, "POSIX modes, non-root")
+    def test_set_keybind_refuses_read_only_profile(self) -> None:
+        path = self.profile_file("save_file: ctrl+s\n")
+        path.chmod(0o444)
+        self.addCleanup(path.chmod, 0o644)
+        before = path.read_bytes()
+        message = kb.set_keybind("save_file", "ctrl+alt+o")
+        self.assertTrue(message.startswith("error: could not write"), message)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.glob(".keybinds.*")), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
