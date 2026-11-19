@@ -755,3 +755,84 @@ def deploy_windows_command(sync_venv: bool | None, profile_only: bool) -> None:
         raise click.ClickException(str(exc)) from exc
     for line in lines:
         click.echo(line)
+
+
+_RULES_CTX = {"help_option_names": ["-h", "--help"]}
+_vault_option = click.option(
+    "--vault",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Agent vault root. Default: $SOPHON_AGENT_VAULT or ~/Linux-PC/Agents.",
+)
+_repo_option = click.option(
+    "--repo",
+    type=click.Path(file_okay=False, exists=True, path_type=Path),
+    default=Path("."),
+    show_default=True,
+    help="Repo checkout whose vault project to compile.",
+)
+_project_option = click.option(
+    "--project", default=None, help="Vault project name. Default: matched by repo path."
+)
+
+
+@cli.group("rules", context_settings=_RULES_CTX)
+def rules_group() -> None:
+    """Compile agent rules from the Obsidian vault into AGENTS.md."""
+
+
+@rules_group.command("sync", context_settings=_RULES_CTX)
+@_repo_option
+@_vault_option
+@_project_option
+@click.option("--force", is_flag=True, help="Overwrite a hand-written AGENTS.md.")
+def rules_sync_command(repo: Path, vault: Path | None, project: str | None, force: bool) -> None:
+    """Write AGENTS.md (and CLAUDE.md -> @AGENTS.md if missing)."""
+    from harness.rules_vault import RulesError, sync
+
+    try:
+        result = sync(repo, vault, project_name=project, force=force)
+    except RulesError as exc:
+        raise click.ClickException(str(exc)) from exc
+    state = "updated" if result.changed else "unchanged"
+    click.echo(f"{result.agents_path} {state} (project {result.project.name})")
+    if result.claude_created:
+        click.echo(f"{repo / 'CLAUDE.md'} created")
+
+
+@rules_group.command("check", context_settings=_RULES_CTX)
+@_repo_option
+@_vault_option
+@_project_option
+def rules_check_command(repo: Path, vault: Path | None, project: str | None) -> None:
+    """Exit 1 if AGENTS.md differs from the vault."""
+    from harness.rules_vault import RulesError, sync
+
+    try:
+        result = sync(repo, vault, project_name=project, check=True)
+    except RulesError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if result.changed:
+        click.echo(f"{result.agents_path} is out of date; run sophon-cli rules sync", err=True)
+        raise SystemExit(1)
+    click.echo(f"{result.agents_path} matches the vault")
+
+
+@rules_group.command("list", context_settings=_RULES_CTX)
+@_repo_option
+@_vault_option
+@_project_option
+def rules_list_command(repo: Path, vault: Path | None, project: str | None) -> None:
+    """Show the notes that would be compiled for this repo."""
+    from harness.rules_vault import RulesError, find_project, load_notes, vault_root
+
+    try:
+        root = vault_root(vault)
+        proj = find_project(root, repo, project)
+    except RulesError as exc:
+        raise click.ClickException(str(exc)) from exc
+    langs = ", ".join(proj.languages) if proj.languages is not None else "all"
+    click.echo(f"vault {root}  project {proj.name}  repo {proj.repo}  languages {langs}")
+    notes = [n for n in load_notes(root) if proj.wants(n)]
+    for note in sorted(notes, key=lambda n: (n.layer != "project", n.order, n.rel)):
+        click.echo(f"  {note.layer:<7} {note.order:>3}  {note.rel}  ({note.title})")

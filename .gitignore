@@ -25,3 +25,5 @@ data/exps/
 .sophon/memory/MEMORY-STATE.md
 .sophon/harness.local.yaml
 .sophon/energy.local.yaml
+.env.*
+!.env.example
