@@ -63,6 +63,7 @@ class Project:
 
 
 def vault_root(explicit: str | Path | None = None) -> Path:
+    """Resolve the vault root (--vault, $SOPHON_AGENT_VAULT, default); RulesError if missing."""
     raw = (
         str(explicit)
         if explicit
@@ -77,6 +78,7 @@ def vault_root(explicit: str | Path | None = None) -> Path:
 
 
 def split_frontmatter(text: str) -> tuple[dict, str]:
+    """Split YAML frontmatter from a note; invalid or missing frontmatter gives ({}, text)."""
     match = _FRONTMATTER.match(text)
     if not match:
         return {}, text
@@ -127,12 +129,22 @@ def clean_body(body: str, shift: int) -> tuple[str, str]:
     return title, text
 
 
+def _read_note(path: Path, root: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Skipping a note would silently change AGENTS.md, so fail loudly instead.
+        rel = path.relative_to(root).as_posix()
+        raise RulesError(f"cannot read vault note {rel}: {exc}") from exc
+
+
 def load_notes(root: Path) -> list[RuleNote]:
+    """All exportable notes under root, sorted by (order, path); RulesError on unreadable notes."""
     notes: list[RuleNote] = []
     for path in sorted(root.rglob("*.md")):
         if any(part.startswith(".") for part in path.relative_to(root).parts):
             continue
-        meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+        meta, body = split_frontmatter(_read_note(path, root))
         if str(meta.get("agents", "")).strip().lower() != "export":
             continue
         layer = str(meta.get("layer", "")).strip().lower()
@@ -160,9 +172,10 @@ def load_notes(root: Path) -> list[RuleNote]:
 
 
 def list_projects(root: Path) -> list[Project]:
+    """Projects declared by Projects/*/project.md notes that have a repo: field."""
     projects: list[Project] = []
     for note in sorted((root / "Projects").glob("*/project.md")):
-        meta, _ = split_frontmatter(note.read_text(encoding="utf-8"))
+        meta, _ = split_frontmatter(_read_note(note, root))
         repo = str(meta.get("repo", "") or "").strip()
         name = str(meta.get("project", "") or note.parent.name).strip()
         langs = meta.get("languages")
@@ -177,6 +190,7 @@ def list_projects(root: Path) -> list[Project]:
 
 
 def find_project(root: Path, repo: Path, name: str | None = None) -> Project:
+    """The project named `name`, else the one whose repo: path is `repo`; RulesError if none."""
     projects = list_projects(root)
     if name:
         for project in projects:
@@ -192,6 +206,7 @@ def find_project(root: Path, repo: Path, name: str | None = None) -> Project:
 
 
 def render_agents_md(root: Path, project: Project) -> str:
+    """Compile AGENTS.md text: repo layer first, then the across-repo layer, then sources."""
     notes = [n for n in load_notes(root) if project.wants(n)]
     repo_notes = [n for n in notes if n.layer == "project"]
     global_notes = [n for n in notes if n.layer == "global"]
@@ -236,6 +251,7 @@ def sync(
     check: bool = False,
     force: bool = False,
 ) -> SyncResult:
+    """Write (or with check=True, only compare) AGENTS.md; create CLAUDE.md if missing."""
     root = vault_root(vault)
     project = find_project(root, repo, project_name)
     content = render_agents_md(root, project)

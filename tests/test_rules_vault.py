@@ -106,6 +106,15 @@ class SyncTests(unittest.TestCase):
             sync(self.repo, self.vault)
         self.assertTrue(sync(self.repo, self.vault, force=True).changed)
 
+    def test_unreadable_note_is_a_clean_error(self) -> None:
+        _write(self.vault / "Global/bad.md", "")
+        (self.vault / "Global/bad.md").write_bytes(
+            b"---\nagents: export\n---\n\xff\xfe"
+        )
+        with self.assertRaises(RulesError) as ctx:
+            sync(self.repo, self.vault)
+        self.assertIn("Global/bad.md", str(ctx.exception))
+
     def test_unknown_repo(self) -> None:
         with self.assertRaises(RulesError):
             find_project(self.vault, self.repo.parent)

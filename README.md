@@ -71,5 +71,6 @@ sophon-cli finetune --recipe config/finetune/qa-chain.yaml
 | Shell | Workspace shell with Landlock/bwrap sandbox | `SOPHON_SHELL_TOOLS=1`, `/sandbox full\|workspace-write\|read-only` |
 | VM sandbox | `shell_exec` inside a disposable QEMU Ubuntu VM | `/sandbox vm`, `/vm status\|up\|down\|reset\|exec` |
 | Harness | Plan / chat / agent modes, allow/ask/deny rules | `/mode`, `/permissions`, `.sophon/harness.yaml` |
+| Agent rules | `AGENTS.md` compiled from an Obsidian rules vault (repo layer, then across-repo layer); `CLAUDE.md` imports it | `sophon-cli rules sync\|check\|list`, vault path `SOPHON_AGENT_VAULT` (default `~/Linux-PC/Agents`) |
 
 Environment reference: [docs/reference/setup.md](docs/reference/setup.md). Integrations: [obsidian](docs/integrations/obsidian/README.md), [zotero](docs/integrations/zotero/README.md), [search](docs/integrations/search/README.md), [mcp](docs/integrations/mcp/README.md), [github](docs/integrations/github/README.md).
