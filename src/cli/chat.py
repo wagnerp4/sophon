@@ -3563,6 +3563,7 @@ def _cmd_keybind(state: _SessionState, arg: str) -> bool:
         format_keybind_list,
         keybinds_path,
         load_keybinds,
+        profile_keybind_problems,
         set_keybind,
     )
 
@@ -3571,6 +3572,8 @@ def _cmd_keybind(state: _SessionState, arg: str) -> bool:
     if not parts:
         for line in format_keybind_list(load_keybinds(root)):
             _emit(line)
+        for problem in profile_keybind_problems(root):
+            _emit(f"  ignored: {problem}")
         _emit(f"file: {keybinds_path(root)}")
         return False
     head = parts[0].lower()

@@ -15,6 +15,17 @@ The editor is the filesystem truth for the human and the landing zone for harnes
 
 Done vs open is listed in [TODO.md](../TODO.md) (Overleaf write, tags/graph/recent, `.tex` to PDF, language pack, smart completion).
 
+## Keybinds
+
+- **Profile:** `.sophon/keybinds.yaml` in the sophon install root. It applies everywhere. `/keybind` lists it, and also lists entries it rejected. `/keybind set ACTION KEY` edits one entry and keeps the rest of the file.
+- **Repo file:** `.sophon/keybinds.yaml` in the folder the editor shows. It only overlays the profile, and only for editor-local actions: `save_file`, `save_as`, `new_file`, `new_folder`, `open_file`, `open_folder`, `find_in_file`, `toggle_project`, `toggle_aux`, `accept_completion`. Repo files cannot bind slash commands, navigation, permission keys, `listen`, or any other action.
+- **Key rules:**
+  - Every value is exactly one key: up to three modifiers plus a key name, for example `ctrl+s`, `ctrl+shift+o`, `f5`, `right`. No commas or spaces.
+  - Repo keys also need a modifier or an F-key, unless the key is the profile's own key for that action.
+  - Repo keys must not reuse a key the profile already binds, or a reserved key (`ctrl+q`, `ctrl+c`, `ctrl+p`, `tab`, `shift+tab`, `f1`, `super+c`).
+- **Profile slash bindings** may carry arguments (`"tts on": f5`), but not quotes, parentheses, backslashes, or control characters.
+- **Safe loading:** files over 64 KiB, YAML aliases, and invalid YAML are ignored as a whole. Loading never writes into a repo.
+
 ## Constraints
 
 - **Propose then accept.** Models do not `open().write` on the project tree. Same path for swarm CodeAgents.

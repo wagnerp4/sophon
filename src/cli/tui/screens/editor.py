@@ -54,7 +54,7 @@ from cli.tui.keybinds import (
     ensure_keybinds_file,
     format_key_label,
     keybinds_path,
-    load_keybinds,
+    load_effective_keybinds,
 )
 from cli.tui.disks import list_readable_disks, same_disk
 from cli.tui.menubar import MenuAction, MenuGroup, MenuItem, PaneMenuBar
@@ -296,6 +296,7 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         self._pending_close = False
         self._keybinds: dict[str, str] = dict(DEFAULT_KEYBINDS)
         self._slash_binds: dict[str, str] = {}
+        self._keybinds_ignored: tuple[tuple[str, str], ...] = ()
         self._review_keys: dict[str, Path] = {}
         self._tree_kind = "project"
         self._disk_root: Path | None = None
@@ -496,14 +497,11 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         return sophon_project_root()
 
     def _load_keybinds(self) -> None:
-        workspace = self._root
-        app_root = self._profile_root()
-        if (workspace / ".sophon" / "keybinds.yaml").is_file():
-            cfg = load_keybinds(workspace)
-        else:
-            cfg = load_keybinds(app_root)
-        self._keybinds = dict(cfg.actions)
-        self._slash_binds = dict(cfg.slash)
+        # Repo files only overlay allow-listed editor actions (sophon-011).
+        load = load_effective_keybinds(self._root)
+        self._keybinds = dict(load.binds.actions)
+        self._slash_binds = dict(load.binds.slash)
+        self._keybinds_ignored = load.ignored
 
     def _apply_keybinds(self) -> None:
         self._load_keybinds()
