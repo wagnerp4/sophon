@@ -13,7 +13,7 @@ beats both.
 
 Local-first, terminal-hosted control plane for software work: a Textual TUI (dashboard, editor, chat), model backends (Ollama, LM Studio, HF, API), a tool harness, RAG, memory, eval, and finetune. Vision and hard constraints: `docs/VISION.md`. Read it before any design work.
 
-sophon is the first target of the feature pipeline and is also meant to run it (item `sophon-006`). Autonomy level: **L0**, so the human approves blueprints and PRs.
+sophon is the first target of the feature pipeline and is also meant to run it (item `sophon-006`). Autonomy level: **L1** (since 2026-11-19, human decision). The human approves blueprints. Agents review and merge PRs through the agentic merge workflow, and the human can veto with a `hold` label.
 
 Commit and branch scopes: `cli`, `tui`, `chat`, `harness`, `backend`, `integrations`, `processing`, `rag`, `memory`, `eval`, `training`, `utils`, `deploy`, `docs`, `deps`.
 
@@ -66,7 +66,7 @@ sophon-cli rules check                              # AGENTS.md matches the vaul
 
 ### Principles
 
-- The human provides ideas and owns decisions: merges, secrets, policy, and anything outward-facing. Agents do the design, implementation, and self-review.
+- The human provides ideas and owns decisions: blueprint approval, secrets, policy, and anything outward-facing beyond the merge workflow. Agents do the design, implementation, review, and (at autonomy L1 and above) the merge through gate G6. The human can veto any PR.
 - Precedence when rules conflict: explicit human instruction in the task > repo layer > across-repo layer > tool defaults.
 - Make the smallest change that fully solves the task. Do not refactor on the side. Record unrelated findings as a new idea instead (see pipeline).
 - Read before you write. Inspect the code, tests, and docs that a change touches, and follow the conventions already there.
@@ -123,7 +123,8 @@ Refs: sophon-000
 #### Push and merge
 
 - Push only your own branches. Never force-push `main`. On your own branch use `--force-with-lease`, never `--force`.
-- No tags, releases, or merges without the human. Default merge is squash.
+- Merges: at autonomy L1 and above, agents merge through the agentic merge workflow (`Global/Pipeline/merge.md`, gate G6). At L0 only the human merges. Default merge is squash.
+- No tags, releases, or repository-setting changes without the human.
 - Never commit `.env*` (except `.env.example`), credentials, large binaries, model weights, or generated caches.
 
 ### Code style (all languages)
@@ -207,7 +208,7 @@ The human writes ideas. Agents turn each idea into a blueprint, review it in sep
 | 2 Blueprint review | review agents | `Reviews/<id>-blueprint-r<n>.md` | G2 blueprint approved |
 | 3 Implement | agent, on a branch | commits + PR draft | G3 build green |
 | 4 Code review | review agents | `Reviews/<id>-code-r<n>.md` | G4 code approved |
-| 5 Human review | human | PR | merge or send back |
+| 5 PR review and merge | merge agent + PR reviewer (L1+), human (L0) | PR, `Reviews/<id>-pr-r<n>.md` | G6 merge-ready → merged |
 | 6 Learn | agent | proposed vault edits | human accepts |
 
 - An item's state lives in the `status` frontmatter of its idea note: `idea` → `blueprint` → `blueprint-review` → `approved` → `implementing` → `code-review` → `human-review` → `merged`, or `dropped`, or `blocked`.
@@ -219,9 +220,9 @@ The human writes ideas. Agents turn each idea into a blueprint, review it in sep
 - Findings about existing code that are outside the item's scope become new ideas, not blueprint scope.
 - A failed review sends the item back one stage with findings. In the next round, re-run only the phases that did not pass, unless the revision changes the design itself rather than folding in those reviewers' own minor findings. In that case, re-run all phases. After 3 rounds without passing, set `status: blocked` and write the open questions for the human. If the only open finding after the last round is a narrowly scoped major with a concrete fix, the architect may write the fix as an amendment. The human may accept it instead of blocking. G4 must then check the amendment explicitly.
 - Autonomy levels, set per repo in its `project.md`:
-  - L0: the human also approves the blueprint (between G2 and stage 3).
-  - L1: G2 approves the blueprint automatically, and the human sees only the PR.
-  - L2: low-risk classes (docs, tests) merge after G4. Not enabled for any repo yet.
+  - L0: the human approves the blueprint **and** reviews and merges every PR.
+  - L1: the human approves the blueprint (or gives the explicit task). Agents review and merge PRs through merge (stage 5, gate G6). The human can veto any PR with a `hold` label or a "changes requested" review.
+  - L2: as L1, but G2 also approves blueprints automatically for low-risk classes (docs, tests). Not enabled for any repo yet.
 
 ### Gates
 
@@ -237,7 +238,54 @@ A gate passes only when every item is checked and the evidence (command plus out
 
 **G4 code approved.** The correctness review and the blueprint-conformance review say `pass`. Every acceptance criterion is mapped to evidence. The diff contains nothing outside the blueprint's scope, or the extra is justified.
 
-**G5 ready for human.** The PR is open with a conventional title. The body has Summary, Item link, Gate report (G0 to G4 with evidence), Test evidence, and Risks and rollback. Sensitive-path changes are called out at the top.
+**G5 PR ready.** The PR is open with a conventional title. The body has Summary, Item link, Gate report (G0 to G4 with evidence), Test evidence, and Risks and rollback. Sensitive-path changes are called out at the top.
+
+**G6 merge-ready.** Defined in the agentic merge workflow (`Global/Pipeline/merge.md`): authority, no veto, G5, G4 on the current head, a fresh PR review that passes, G3 on the merge result, dependency and stack order, and a clean mergeable state. At autonomy L0, the human's merge replaces G6.
+
+### Agentic PR review and merge (stage 5)
+
+At autonomy level L1 and above, agents review and merge pull requests. The human approves the blueprint (or gives the explicit task, for non-pipeline PRs) and can veto any PR at any time. Tags, releases, force-pushes to the default branch, and repository settings stay human-only.
+
+#### Roles
+
+- **Merge agent:** runs this workflow, executes the merge, and writes the records. It may be the session that implemented the change.
+- **PR reviewer:** a fresh-context agent that never wrote or reviewed this change before. It reviews the PR **as it is on GitHub**: title, body, base, diff, and the head SHA. It writes `Reviews/<item-or-pr>-pr-r<n>.md` in the vault and posts the same verdict as a GitHub review comment (`gh pr review --comment`; the same account cannot approve its own PR).
+
+#### G6: merge-ready
+
+A PR is merged only when every item holds, with evidence linked in the PR's vault note or the review:
+
+1. **Authority.** Either the item's blueprint is `approved` (G2 + human), or the PR implements an explicit human instruction recorded in the session or an idea note. PRs from forks, or from anyone but the maintainer or the pipeline, are **never** merged by agents.
+2. **No veto.** No `hold` label, no "changes requested" review, and no unresolved human comment on the PR.
+3. **G5.** Conventional title, and a body with Summary, Item, Gate report, Test evidence, and Risks and rollback. Sensitive-path changes are named at the top.
+4. **G4 on this head.** For pipeline items, G4 passed for the current head SHA. If the head changed after G4, the changed commits get a G4 delta review first.
+5. **PR review.** The PR reviewer's verdict is `pass` for the current head SHA: the description matches the diff; the base is correct; no unrelated files; no secrets; the commit messages follow the git rules.
+6. **G3 on the merge result.** The repo checks (repo layer, "Repo checks") pass on the **base merged with the head**, run locally in a clean worktree. Until CI exists (sophon-001, sophon-018), the merge agent runs them and posts the output as a PR comment.
+7. **Order.** Every `depends_on` item and every stacked base PR is already merged. The PR's base is the default branch.
+8. **Mergeable.** GitHub reports `MERGEABLE` and `CLEAN`.
+
+#### Merge procedure
+
+1. Re-check G6 items 2, 7 and 8 immediately before merging. Anything can change while reviews run.
+2. Squash merge: `gh pr merge <n> --squash --subject "<PR title> (#<n>)" --body "<summary>\n\nRefs: <item>\n\nCo-Authored-By: …"`. Use a merge commit or a rebase only if the human asks.
+3. **Stacked PRs.** After the lower PR is squash-merged:
+   - `git rebase --onto origin/<default> <old-base> <branch>` (this drops the commits that were squashed);
+   - `git push --force-with-lease`;
+   - `gh pr edit <n> --base <default>`;
+   - redo G6 items 4–6 for the new head;
+   - merge.
+4. Delete the merged head branch, on the remote and locally.
+5. **Post-merge check.** Fetch, check out the default branch in a clean worktree, and run the repo checks.
+   - If they fail: open a `revert:` PR at once and merge it through this same workflow, with authority "post-merge failure". Set the item to `blocked` and notify the human.
+6. **Records.** Set the idea's `status: merged`, link the merged PR and squash SHA in the item log and the PR note, and queue the stage-6 retrospective.
+7. **Report** to the human: what merged, in which order, the evidence links, and anything skipped.
+
+#### Never
+
+- Force-push or push directly to the default branch, or change repository settings and branch protection.
+- Merge with a failing or skipped G6 item. A "probably fine" never counts.
+- Merge a PR whose head SHA differs from the one that was reviewed and checked.
+- Create tags or releases, or deploy.
 
 ## Sources
 
@@ -255,3 +303,4 @@ A gate passes only when every item is checked and the evidence (command plus out
 - `Global/mcp.md`
 - `Global/Pipeline/overview.md`
 - `Global/Pipeline/gates.md`
+- `Global/Pipeline/merge.md`
