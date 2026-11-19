@@ -3563,6 +3563,8 @@ def _cmd_keybind(state: _SessionState, arg: str) -> bool:
         format_keybind_list,
         keybinds_path,
         load_keybinds,
+        normalise_key,
+        profile_keybind_problems,
         set_keybind,
     )
 
@@ -3571,6 +3573,8 @@ def _cmd_keybind(state: _SessionState, arg: str) -> bool:
     if not parts:
         for line in format_keybind_list(load_keybinds(root)):
             _emit(line)
+        for problem in profile_keybind_problems(root):
+            _emit(f"  ignored: {problem}")
         _emit(f"file: {keybinds_path(root)}")
         return False
     head = parts[0].lower()
@@ -3605,7 +3609,7 @@ def _cmd_keybind(state: _SessionState, arg: str) -> bool:
             _emit(message)
             return False
         _reload_keybinds_ui()
-        _emit(f"({parts[1]} = {parts[2]})")
+        _emit(f"({parts[1]} = {normalise_key(parts[2])})")
         return False
     _emit("usage: /keybind [set ACTION KEY | unset ACTION | edit | reload]")
     return False
