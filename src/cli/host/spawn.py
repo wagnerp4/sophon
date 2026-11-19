@@ -340,7 +340,16 @@ def launch_tui_in_new_terminal(user_argv: list[str]) -> int:
     env["SOPHON_TUI_LOG"] = str(log_path.resolve())
     env["SOPHON_TUI_CHILD"] = "1"
 
-    command = build_child_argv(user_argv)
+    from cli.host.launch import (
+        launch_dir,
+        record_launch_dir,
+        token_from_argv,
+        with_token_arg,
+    )
+
+    # An explicit token in our own argv wins (R8: `sophon-chat-tui --launch-dir-token …`).
+    record_launch_dir(token_from_argv(user_argv))
+    command = build_child_argv(with_token_arg(user_argv, launch_dir()))
     cwd = str(project_root())
     try:
         if sys.platform == "win32" and not windows_profile_installed():

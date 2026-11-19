@@ -207,8 +207,9 @@ def linux_path_to_windows(path: str | Path) -> str | None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     out = proc.stdout.strip()
     return out or None
@@ -387,6 +388,7 @@ def delegate_wsl_to_windows_cli(
     user_argv: list[str],
     *,
     preference: str = "auto",
+    launch_dir: Path | None = None,
 ) -> None:
     if not is_wsl() or sys.platform == "win32":
         return
@@ -400,7 +402,7 @@ def delegate_wsl_to_windows_cli(
             raise SystemExit(wsl_windows_venv_message())
         return
     cleaned = strip_wsl_platform_flags(user_argv)
-    code = wsl_reexec_windows_cli(stem, cleaned)
+    code = wsl_reexec_windows_cli(stem, cleaned, launch_dir=launch_dir)
     if code is None:
         if preference == "windows":
             raise SystemExit(wsl_windows_venv_message())
@@ -408,7 +410,34 @@ def delegate_wsl_to_windows_cli(
     raise SystemExit(int(code))
 
 
-def wsl_reexec_windows_cli(stem: str, user_argv: list[str]) -> int | None:
+def _wsl_launch_env(launch_dir: Path | None) -> dict[str, str]:
+    """A copy of the env carrying the launch-dir token to Windows via WSLENV (sophon-010)."""
+    env = os.environ.copy()
+    win_dir = linux_path_to_windows(launch_dir) if launch_dir is not None else None
+    token = None
+    if win_dir:
+        from utils.device.launch_token import TOKEN_ENV, encode_token
+
+        token = encode_token(win_dir)
+    if token is None:
+        if launch_dir is not None:
+            print(
+                "[sophon] launch dir unknown; Windows TUI opens in the deploy root",
+                file=sys.stderr,
+                flush=True,
+            )
+        return env
+    env[TOKEN_ENV] = token
+    shared = [item for item in env.get("WSLENV", "").split(":") if item]
+    if not any(item.split("/", 1)[0] == TOKEN_ENV for item in shared):
+        shared.append(TOKEN_ENV)
+    env["WSLENV"] = ":".join(shared)
+    return env
+
+
+def wsl_reexec_windows_cli(
+    stem: str, user_argv: list[str], *, launch_dir: Path | None = None
+) -> int | None:
     if not is_wsl() or sys.platform == "win32":
         return None
     exe = resolve_windows_console_script(stem)
@@ -420,7 +449,7 @@ def wsl_reexec_windows_cli(stem: str, user_argv: list[str]) -> int | None:
         return None
     forward = [win_exe, *strip_wsl_platform_flags(user_argv)]
     line = subprocess.list2cmdline(forward)
-    return subprocess.call([cmd, "/c", line])
+    return subprocess.call([cmd, "/c", line], env=_wsl_launch_env(launch_dir))
 
 
 def resolve_installed_script(stem: str) -> Path | None:

@@ -8,6 +8,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
+from cli.host.launch import markup_safe_path
 from cli.tui.tiles.base import BaseTile, TileState
 from cli.tui.tiles.hardware import fetch_hardware_state
 from utils.device.env_bootstrap import sophon_project_root
@@ -58,7 +59,7 @@ def format_host_snapshot(app: Any, *, compact: bool = False) -> str:
     if isinstance(win_total, int) and isinstance(win_avail, int):
         ram_line += f"  win={_fmt_bytes(win_avail)} free / {_fmt_bytes(win_total)}"
     model_line = getattr(app, "model_status_text", "unknown")
-    cwd = getattr(app, "cwd", sophon_project_root())
+    cwd = markup_safe_path(getattr(app, "cwd", sophon_project_root()))  # launch dir: escape
     root = sophon_project_root()
     if compact:
         return (
