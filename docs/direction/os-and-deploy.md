@@ -50,7 +50,7 @@ REPL without a desktop emulator:
 sophon-cli chat --interface repl
 ```
 
-Desktop spawn (optional): if `kitty`, `wezterm`, or `gnome-terminal` is on PATH, `sophon-cli chat` may open a new window. Otherwise stay in the current TTY with `--no-spawn-window`.
+Desktop spawn (optional): if `kitty`, `wezterm`, `konsole`, or `gnome-terminal` is on PATH (tried in that order), `sophon-cli chat` may open a new window. Otherwise stay in the current TTY with `--no-spawn-window`.
 
 Manual kitty / wezterm:
 
@@ -67,7 +67,7 @@ wezterm start --cwd "$PWD" -- .venv/bin/sophon-cli chat --no-spawn-window
 | --- | --- | --- | --- | --- |
 | Edit source | yes | yes (preferred here) | yes | yes |
 | Textual TUI | WT profile `sophon` | `--windows` or `--linux` | `--no-spawn-window` | Terminal profile stub |
-| Desktop spawn | `wt.exe` | `wt.exe -p sophon` | kitty / wezterm / gnome-terminal when present | osascript Terminal |
+| Desktop spawn | `wt.exe` | `wt.exe -p sophon` | kitty / wezterm / konsole / gnome-terminal when present | osascript Terminal |
 | Shell tool | PowerShell | bash (Linux TUI) | POSIX | POSIX |
 | Autostart | Startup `.lnk` via Store `pwsh` | n/a | later | later |
 
@@ -82,7 +82,7 @@ Textual itself is cross-platform. Sophon is a single CLI (`sophon-cli`) plus ext
 
 ## Future direction
 
-1. Linux: `install_linux_terminal_profile` copied to a real `.desktop` or kitty/wezterm snippet. Native spawn already probes kitty / wezterm / gnome-terminal.
+1. Linux: `install_linux_terminal_profile` copied to a real `.desktop` or kitty/wezterm snippet. Native spawn already probes kitty / wezterm / konsole / gnome-terminal.
 2. macOS: replace the chat-log instruction file with a documented iTerm/Ghostty profile.
 3. Single-tree mode for machines that only have POSIX (no Windows deploy). `SOPHON_WINDOWS_ROOT` unset. This is the Arch/Omarchy path.
 4. Keep `sophon-cli deploy-windows` as the Windows-specific path. Do not invent `deploy-macos` until there is a second runtime tree.
