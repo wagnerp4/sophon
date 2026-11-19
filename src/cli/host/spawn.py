@@ -164,7 +164,8 @@ def _spawn_native_linux(
     konsole = shutil.which("konsole")
     if konsole:
         return subprocess.Popen(
-            [konsole, "--workdir", cwd, "-p", f"tabtitle={window_title}", "-e", *command],
+            # --separate: a single-process Konsole would otherwise drop our env (SOPHON_TUI_*).
+            [konsole, "--separate", "--workdir", cwd, "-p", f"tabtitle={window_title}", "-e", *command],
             env=env,
             cwd=cwd,
         )

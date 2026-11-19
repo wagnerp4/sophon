@@ -61,7 +61,7 @@ Headless / SSH:
 sophon-cli chat --interface repl --preset llama2_7b_chat
 ```
 
-Optional: open the same command in kitty or wezterm. Native desktop spawn tries those terminals when they are on PATH. If none are present, use `--no-spawn-window`.
+Optional: open the same command in kitty, wezterm, konsole, or gnome-terminal. Native desktop spawn tries them in that order when they are on PATH. If none are present, use `--no-spawn-window`.
 
 LM Studio / Ollama on localhost work the same as on WSL. GPU Hugging Face weights need a CUDA-capable `uv` venv on this machine. Do not `uv sync` a Windows PE venv into this tree.
 

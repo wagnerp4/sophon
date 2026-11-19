@@ -79,7 +79,9 @@ def _copy_via_klipper(text: str) -> bool:
                 check=False,
                 timeout=3,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            return False  # Klipper is unresponsive; do not block the UI on further variants
+        except (OSError, ValueError):  # ValueError: text contains NUL, invalid in argv
             continue
         if completed.returncode == 0:
             return True
