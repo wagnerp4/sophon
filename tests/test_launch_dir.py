@@ -154,10 +154,28 @@ class RecordTests(_Base):
             mock.patch.object(
                 Path, "is_dir", side_effect=PermissionError(13, "denied")
             ),
-            mock.patch("sys.stderr"),
+            mock.patch("sys.stderr") as err,
         ):
             result = launch.record_launch_dir(launch.encode_token(str(self.tmp)))
         self.assertEqual(result, self.tmp)
+        warned = [
+            c.args[0] for c in err.write.call_args_list if "[sophon]" in c.args[0]
+        ]
+        self.assertEqual(len(warned), 1)
+
+    def test_deleted_cwd_falls_back_to_install_root(self) -> None:
+        from cli.terminal import parse_chat_argv
+
+        install = self.make_dir("install")
+        gone = self.make_dir("gone")
+        os.chdir(gone)
+        gone.rmdir()
+        with mock.patch(
+            "utils.device.env_bootstrap.sophon_project_root", return_value=install
+        ):
+            parse_chat_argv(["--no-spawn-window"])  # must not raise FileNotFoundError
+        self.assertEqual(launch.launch_dir(), install)
+        os.chdir(self.tmp)
 
     def test_ac1_windows_system_dir_falls_back_to_install_root(self) -> None:
         install = self.make_dir("install")
@@ -276,6 +294,7 @@ class SpawnTests(_Base):
             spawn._spawn_native_linux(
                 ["sophon-chat-tui", *child], env, "/install", window_title="sophon chat"
             )
+        self.assertEqual(popen.call_count, 2)
         for call in popen.call_args_list:
             joined = " ".join(call.args[0])
             self.assertIn(token, joined)
@@ -367,6 +386,62 @@ class WslTests(_Base):
         ):
             self.assertIsNone(plat.linux_path_to_windows("/home/x"))
         self.assertIn("timeout", seen)
+
+
+class PassThroughTests(_Base):
+    def test_wslenv_already_listing_the_variable_is_not_duplicated(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"WSLENV": f"A:{TOKEN_ENV}/p"}),
+            mock.patch.object(
+                plat, "linux_path_to_windows", return_value="\\\\wsl.localhost\\D\\x"
+            ),
+        ):
+            env = plat._wsl_launch_env(self.tmp)
+        self.assertEqual(env["WSLENV"], f"A:{TOKEN_ENV}/p")
+        self.assertIn(TOKEN_ENV, env)
+
+    def test_chat_command_passes_launch_dir_to_delegation(self) -> None:
+        from click.testing import CliRunner
+
+        from cli import terminal
+
+        target = self.make_dir("repo")
+        seen: dict = {}
+
+        def fake_delegate(stem, argv, *, preference, launch_dir):
+            seen["launch_dir"] = launch_dir
+            raise SystemExit(0)
+
+        with mock.patch(
+            "utils.device.platform.delegate_wsl_to_windows_cli",
+            side_effect=fake_delegate,
+        ):
+            CliRunner().invoke(
+                terminal.chat_command, [TOKEN_OPTION, launch.encode_token(target)]
+            )
+        self.assertEqual(seen["launch_dir"], target)
+
+    def test_spawned_child_env_never_inherits_token(self) -> None:
+        from cli.host import spawn
+
+        os.environ[TOKEN_ENV] = launch.encode_token(self.tmp)
+        captured: dict = {}
+
+        def fake_spawn(command, env, cwd, **_kw):
+            captured["env"] = dict(env)
+            return mock.Mock(pid=1)
+
+        with (
+            mock.patch.object(spawn, "spawn_desktop_terminal", side_effect=fake_spawn),
+            mock.patch.object(spawn, "tail_log_until_exit", return_value=0),
+            mock.patch.object(
+                spawn, "make_session_log_path", return_value=self.tmp / "log" / "s.log"
+            ),
+            mock.patch.object(spawn, "install_windows_terminal_profile"),
+            mock.patch.object(spawn, "windows_profile_installed", return_value=True),
+        ):
+            spawn.launch_tui_in_new_terminal(["chat"])
+        self.assertNotIn(TOKEN_ENV, captured["env"])
 
 
 class TuiTests(_Base):
@@ -462,21 +537,45 @@ class TuiTests(_Base):
         spy.assert_called_once_with(install)
         self.assertEqual(list(self.tmp.iterdir()), [install])
 
-    def test_ac14_hostile_names_render_literally(self) -> None:
-        from rich.markup import render
+    def test_ac14_hostile_names_render_literally_in_textual(self) -> None:
+        import random
+
+        from textual.content import Content
 
         from cli.tui.screens import editor
         from cli.tui.tiles import host
 
+        def plain(markup: str) -> str:
+            return Content.from_markup(markup).plain.replace("\u200b", "")
+
         name = "a[b]c[/x]\n"
         shown = launch.markup_safe_path(self.tmp / name)
-        self.assertEqual(render(shown).plain, str(self.tmp / "a[b]c[/x]\\x0a"))
+        self.assertEqual(plain(shown), str(self.tmp / "a[b]c[/x]\\x0a"))
+        for crash in (
+            "a[/( b",
+            "x:[  $@)x=($$)",
+            "[(a[\\##x@@=b",
+            "end\\",
+            "C:\\me\\[draft",
+        ):
+            with self.subTest(name=crash):
+                safe = launch.markup_safe_path(crash)
+                self.assertEqual(plain(f"[dim]cwd · {safe}[/dim]"), f"cwd · {crash}")
         stub = mock.Mock()
         stub._tree_kind = "project"
         component = "a[b]c[bold]x\n"  # one path component: POSIX names cannot hold "/"
         stub._tree_root.return_value = self.tmp / component
         title = editor.EditorScreen._tree_title(stub)
-        self.assertEqual(render(title).plain, "Project · a[b]c[bold]x\\x0a")
+        self.assertEqual(plain(title), "Project · a[b]c[bold]x\\x0a")
+        label = mock.Mock()
+        label_stub = mock.Mock()
+        label_stub.query_one.return_value = label
+        label_stub.app.cwd = self.tmp / name
+        label_stub._root = self.tmp
+        editor.EditorScreen._refresh_terminal_cwd(label_stub)
+        self.assertEqual(
+            plain(label.update.call_args.args[0]), f"cwd · {self.tmp}/a[b]c[/x]\\x0a"
+        )
         app = mock.Mock()
         app.cwd = self.tmp / name
         app.model_status_text = "m"
@@ -485,17 +584,32 @@ class TuiTests(_Base):
             "utils.device.system_check.collect_system_snapshot", return_value=snapshot
         ):
             text = host.format_host_snapshot(app, compact=True)
-        self.assertIn("a[b]c[/x]\\x0a", render(text).plain)
+        self.assertIn("a[b]c[/x]\\x0a", plain(text))
+        rng = random.Random(9)
+        alpha = "ab\\[]/=#@x :$()"
+        for _ in range(3000):
+            raw = "".join(rng.choice(alpha) for _ in range(rng.randint(0, 14)))
+            safe = launch.markup_safe_path(raw)
+            for pre, post in (("[dim]", "[/dim]"), ("Project · ", ""), ("", "")):
+                self.assertEqual(
+                    plain(f"{pre}{safe}{post}"), pre.replace("[dim]", "") + raw
+                )
 
 
 class BoundaryTests(_Base):
     def test_ac12_workspace_stays_install_root_and_launch_edits_ask(self) -> None:
-        from harness.gate import load_harness
+        from types import SimpleNamespace
+
+        from harness.gate import ensure_harness
 
         install = self.make_dir("install")
         repo = self.make_dir("repo")
         launch.record_launch_dir(launch.encode_token(repo))
-        harness = load_harness(install)
+        os.chdir(repo)  # even with the process in the launch dir
+        state = SimpleNamespace(
+            project_root=install
+        )  # sessions use sophon_project_root()
+        harness = ensure_harness(state)
         self.assertEqual(harness.workspace_path(), install)
         target = repo / "f.py"
         target.write_text("x = 1\n", encoding="utf-8")

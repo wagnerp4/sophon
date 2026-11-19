@@ -68,6 +68,12 @@ def _is_windows_system_dir(path: Path) -> bool:
     return norm(str(path)) == norm(root)
 
 
+def _install_root() -> Path:
+    from utils.device.env_bootstrap import sophon_project_root
+
+    return sophon_project_root()
+
+
 def record_launch_dir(token: str | None = None) -> Path:
     """Record the launch dir once per process: argv token > env token (Windows) > cwd."""
     global _recorded
@@ -89,11 +95,12 @@ def record_launch_dir(token: str | None = None) -> Path:
             break
         _warn(f"ignoring invalid launch-dir token from {source}")
     if chosen is None:
-        chosen = Path.cwd()
+        try:
+            chosen = Path.cwd()
+        except OSError:  # the cwd was deleted: fall back like an unknown launch dir
+            chosen = _install_root()
     if sys.platform == "win32" and _is_windows_system_dir(chosen):
-        from utils.device.env_bootstrap import sophon_project_root
-
-        chosen = sophon_project_root()
+        chosen = _install_root()
     try:
         _recorded = chosen.resolve()
     except OSError:
@@ -144,10 +151,16 @@ def escape_controls(text: str) -> str:
 
 
 def markup_safe_path(path: Path | str) -> str:
-    """A launch-dir-derived path made safe for Rich markup widgets."""
-    from rich.markup import escape
+    """A launch-dir-derived path made safe for Textual markup (Static, notify, titles).
 
-    return escape(escape_controls(str(path)))
+    Textual treats a backslash directly before "[" as an escape and keeps other
+    backslashes literal, so every "[" gets one backslash, and a trailing backslash is
+    followed by a zero-width space so it cannot escape the caller's next tag. Do not use
+    this for sinks that do not parse markup (RichLog(markup=False), the chat transcript,
+    which escapes itself): there, use escape_controls() only.
+    """
+    text = escape_controls(str(path)).replace("[", "\\[")
+    return text + "\u200b" if text.endswith("\\") else text
 
 
 def _reset_for_tests() -> None:

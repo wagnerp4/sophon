@@ -84,7 +84,7 @@ from cli.tui.permission import PermissionPrompt
 from cli.tui.choice import ChoicePrompt
 from cli.tui.setup_prompt import SETUP_SKIP, SetupPrompt
 from cli.tui.speech import ChatLogPane, ChatTranscript, PushToTalkMixin, TranscriptHostMixin
-from cli.host.launch import markup_safe_path, launch_dir
+from cli.host.launch import escape_controls, launch_dir
 from utils.device.env_bootstrap import sophon_project_root
 from utils.download.hf import (
     capture_hub_download_logs,
@@ -2504,7 +2504,7 @@ class SophonTuiApp(App):
         result = session.run(command)
         self.cwd = session.cwd
         if result.handled_as_cd:
-            shown = markup_safe_path(self.cwd)
+            shown = escape_controls(str(self.cwd))  # sinks here do not parse markup
             self.call_from_thread(self._append_home_log, f"[dim]cwd -> {shown}[/dim]")
             return
         if result.output.strip():

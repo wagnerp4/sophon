@@ -74,7 +74,7 @@ sophon-cli chat --linux --preset llama2_7b_chat
 
 ## Launch directory
 
-sophon remembers the directory you started it from. The TUI shell and the editor open there, and the rules loader (`AGENTS.md`) uses it. Model presets and downloads always stay in the install root.
+sophon remembers the directory you started it from. The TUI shell and the editor open there. Once the `AGENTS.md` rules loader lands (sophon-004), it will use it too. Model presets and downloads always stay in the install root.
 
 - **Start from a repo:** `cd` into it, then run `sophon-cli chat`. The spawned window and `--no-spawn-window` both open in that directory. With `uv`, use `uv run --project <sophon checkout> sophon-cli chat`. `uv --directory` changes into the checkout first, so sophon would see the install root.
 - **WSL → Windows TUI:** the directory travels to Windows as a `\\wsl.localhost\…` path (browsing it is slower). If the path cannot be converted, the Windows TUI opens in the deploy root.
