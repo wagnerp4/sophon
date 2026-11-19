@@ -186,11 +186,11 @@ class KeyValidationTests(_Base):
             with self.subTest(key=reserved):
                 self.ws_file(f"save_as: {reserved}\n")
                 load = kb.load_effective_keybinds(self.workspace)
-                self.assertIn(
-                    self.ignored(load).get("action save_as"), ("reserved key",)
+                self.assertEqual(
+                    self.ignored(load).get("action save_as"), "reserved key"
                 )
-        for entry, reason in load.ignored:
-            self.assertTrue(entry and reason)
+                for entry, reason in load.ignored:
+                    self.assertTrue(entry and reason)
 
 
 class ProfileSlashAndSetKeybindTests(_Base):
@@ -263,11 +263,19 @@ class ProfileSlashAndSetKeybindTests(_Base):
         self.assertEqual(path.read_bytes(), before)
 
     def test_amendment_set_keybind_refuses_oversized_result(self) -> None:
-        filler = "".join(f"unknown_{i}: ctrl+k\n" for i in range(3200))
-        path = self.profile_file(filler[: kb.MAX_KEYBINDS_BYTES - 10])
+        lines, size, i = [], 0, 0
+        while True:  # whole lines only, so the file stays valid YAML just under the cap
+            line = f"unknown_{i}: ctrl+k\n"
+            if size + len(line) > kb.MAX_KEYBINDS_BYTES - 40:
+                break
+            lines.append(line)
+            size += len(line)
+            i += 1
+        path = self.profile_file("".join(lines))
+        self.assertEqual(kb.read_keybinds_file(path).problems, ())
         before = path.read_bytes()
-        message = kb.set_keybind("save_file", "ctrl+o")
-        self.assertTrue(message.startswith("error:"), message)
+        message = kb.set_keybind("save_file", "ctrl+alt+o")
+        self.assertIn("would exceed 64 KiB", message)
         self.assertEqual(path.read_bytes(), before)
 
 
@@ -297,6 +305,8 @@ class HostileFileTests(_Base):
         for level in range(ord("b"), ord("j")):
             prev = chr(level - 1)
             bomb += f"{chr(level)}: &{chr(level)} [*{prev},*{prev},*{prev},*{prev},*{prev},*{prev},*{prev},*{prev},*{prev}]\n"
+        bomb += "#" * max(0, 466 - len(bomb)) + "\n"
+        self.assertGreaterEqual(len(bomb.encode()), 466)
         self.assertEqual(self.problems_for(bomb), ("aliases are not allowed",))
         self.assertLess(self.elapsed, 0.1)
 
@@ -315,10 +325,18 @@ class HostileFileTests(_Base):
             "save_file: " + "9" * 5000 + "\n",
             "9" * 5000 + ": ctrl+k\n",
             '"\\U00110000": ctrl+k\n',
+            'a: "\\UFFFFFFFF"\n',
         ):
             with self.subTest(doc=doc[:30]):
                 raw = kb.read_keybinds_file(self.ws_file(doc))
-                self.assertIsInstance(raw, kb.RawKeybinds)
+                values = list(raw.actions.values()) + list(raw.actions)
+                self.assertTrue(raw.problems or values, doc[:30])
+                for item in values:
+                    self.assertIsInstance(item, str)
+        # typed-looking scalars load as plain strings and are then validated as keys
+        raw = kb.read_keybinds_file(self.ws_file("save_file: 2020-13-45\n"))
+        self.assertEqual(raw.actions, {})
+        self.assertTrue(raw.problems[0].startswith("action save_file: invalid key"))
 
     def test_ac6_problem_list_is_capped(self) -> None:
         doc = "".join(f"a{i}: [x]\n" for i in range(6000))
@@ -383,7 +401,8 @@ class HostileFileTests(_Base):
             for text in (entry, reason):
                 self.assertNotIn("\x1b", text)
                 self.assertNotIn("\x07", text)
-                self.assertLessEqual(len(text), 120)
+                self.assertLessEqual(len(text), len("action ") + 80)
+        self.assertLessEqual(len(kb._show("x" * 500)), 80)
 
 
 class NoWriteTests(_Base):
@@ -469,3 +488,12 @@ class EditorWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WriteModeTests(_Base):
+    @unittest.skipIf(os.name != "posix", "POSIX file modes")
+    def test_set_keybind_keeps_file_mode(self) -> None:
+        path = self.profile_file("save_file: ctrl+s\n")
+        path.chmod(0o644)
+        self.assertEqual(kb.set_keybind("save_file", "ctrl+alt+o"), "")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)

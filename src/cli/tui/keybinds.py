@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -333,6 +334,8 @@ def _atomic_write(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+        if target.exists():
+            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))  # mkstemp creates 0600
         os.replace(tmp, target)
     except BaseException:
         try:
@@ -492,7 +495,15 @@ def _load_document(path: Path) -> tuple[object, str | None]:
         return yaml.load(text, Loader=_NoAliasLoader), None
     except _AliasRefused:
         return None, "aliases are not allowed"
-    except (yaml.YAMLError, RecursionError, ValueError, TypeError, KeyError, AttributeError) as exc:
+    except (
+        yaml.YAMLError,
+        RecursionError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        ArithmeticError,  # e.g. OverflowError from "\UFFFFFFFF" escapes
+    ) as exc:
         return None, f"invalid YAML ({type(exc).__name__})"
 
 
