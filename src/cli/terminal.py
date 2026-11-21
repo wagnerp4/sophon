@@ -166,6 +166,9 @@ def parse_chat_argv(argv: list[str]) -> ChatCliParams:
     ctx = click.Context(chat_command, info_name="chat")
     with ctx.scope():
         chat_command.parse_args(ctx, list(argv))
+        from cli.host.launch import record_launch_dir
+
+        record_launch_dir(ctx.params["launch_dir_token"])
         return build_chat_cli_params(
             model=ctx.params["model"],
             preset=ctx.params["preset"],
@@ -454,6 +457,7 @@ def infer_command(
     default=None,
     help="WSL only: run via .venv/Scripts/sophon-cli.exe (fast loads). Default: auto when .exe exists. Env SOPHON_WINDOWS_CLI.",
 )
+@click.option("--launch-dir-token", "launch_dir_token", default=None, hidden=True)
 def chat_command(
     model: str | None,
     preset: str | None,
@@ -501,14 +505,19 @@ def chat_command(
     chat_first: bool,
     preload: bool,
     use_windows_cli: bool | None,
+    launch_dir_token: str | None,
 ) -> None:
+    from cli.host.launch import launch_dir, record_launch_dir
     from utils.device.platform import delegate_wsl_to_windows_cli, wsl_windows_cli_preference
 
+    record_launch_dir(launch_dir_token)  # before delegation: the WSL side knows the real cwd
     preference = wsl_windows_cli_preference(
         windows=use_windows_cli is True,
         linux=use_windows_cli is False,
     )
-    delegate_wsl_to_windows_cli("sophon-cli", sys.argv[1:], preference=preference)
+    delegate_wsl_to_windows_cli(
+        "sophon-cli", sys.argv[1:], preference=preference, launch_dir=launch_dir()
+    )
 
     cfg = build_chat_cli_params(
         model=model,

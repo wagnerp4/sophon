@@ -72,6 +72,16 @@ uv sync --extra tui --extra finetune
 sophon-cli chat --linux --preset llama2_7b_chat
 ```
 
+## Launch directory
+
+sophon remembers the directory you started it from. The TUI shell and the editor open there. Once the `AGENTS.md` rules loader lands (sophon-004), it will use it too. Model presets and downloads always stay in the install root.
+
+- **Start from a repo:** `cd` into it, then run `sophon-cli chat`. The spawned window and `--no-spawn-window` both open in that directory. With `uv`, use `uv run --project <sophon checkout> sophon-cli chat`. `uv --directory` changes into the checkout first, so sophon would see the install root.
+- **WSL → Windows TUI:** the directory travels to Windows as a `\\wsl.localhost\…` path (browsing it is slower). If the path cannot be converted, the Windows TUI opens in the deploy root.
+- **Install root:** Windows Terminal profiles, autostart, `start-sophon-chat.ps1`, the Linux `.desktop` entry, and `--interface toad` start in the install or deploy root. macOS spawning is fixed separately.
+- **Workspace boundary:** the harness workspace stays at the install root. Edits that agents propose under the launch directory therefore always ask for approval.
+- **Repo keybinds:** a repo's `.sophon/keybinds.yaml` may only rebind editor-local actions (see `docs/direction/editor.md`). The editor never writes into the launch directory.
+
 ## Troubleshooting: Windows Terminal 0x8007010b
 
 `error 2147942667 (0x8007010b) ... Could not access starting directory "C:\Software\Python\NLP\Personal\sophon"` means the Windows Terminal **sophon** profile still points at a folder that was deleted. The Textual app is not the failure. Recreate the deploy tree from WSL:

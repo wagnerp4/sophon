@@ -336,11 +336,21 @@ def launch_tui_in_new_terminal(user_argv: list[str]) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_offset_at_launch = log_path.stat().st_size if log_path.is_file() else 0
 
+    from cli.host.launch import (
+        launch_dir,
+        record_launch_dir,
+        token_from_argv,
+        with_token_arg,
+    )
+
+    # Record first: an explicit token in our argv wins (R8), and recording pops the token
+    # env var so the child's env copy below never inherits it.
+    record_launch_dir(token_from_argv(user_argv))
     env = child_runtime_env(os.environ.copy())
     env["SOPHON_TUI_LOG"] = str(log_path.resolve())
     env["SOPHON_TUI_CHILD"] = "1"
 
-    command = build_child_argv(user_argv)
+    command = build_child_argv(with_token_arg(user_argv, launch_dir()))
     cwd = str(project_root())
     try:
         if sys.platform == "win32" and not windows_profile_installed():

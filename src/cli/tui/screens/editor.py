@@ -46,6 +46,7 @@ from cli.code_assist import (
     ensure_assist,
     unified_diff_text,
 )
+from cli.host.launch import markup_safe_path
 from cli.tui.keybinds import (
     DEFAULT_KEYBINDS,
     KeybindSet,
@@ -451,7 +452,7 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         yield NexusFooter()
 
     def on_mount(self) -> None:
-        ensure_highlights_file(self._root)
+        ensure_highlights_file(self._profile_root())  # never write into the launch dir
         self._apply_keybinds()
         self._set_pane_title("project", self._tree_title())
         self.query_one("#editor-files-show", Button).display = False
@@ -570,10 +571,10 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         if self._tree_kind == "disk":
             if sys.platform == "win32" and root.drive:
                 return f"Disk · {root.drive}\\"
-            return f"Disk · {root}"
+            return f"Disk · {markup_safe_path(root)}"
         if self._tree_kind == "vault":
-            return f"Vault · {root.name}"
-        return f"Project · {root.name}"
+            return f"Vault · {markup_safe_path(root.name)}"
+        return f"Project · {markup_safe_path(root.name)}"
 
     def _focus_explorer(self) -> None:
         if self._tree_kind == "zotero":
@@ -1298,7 +1299,7 @@ class EditorScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, Mod
         except NoMatches:
             return
         cwd = Path(getattr(self.app, "cwd", self._root)).resolve()
-        label.update(f"cwd · {cwd}")
+        label.update(f"cwd · {markup_safe_path(cwd)}")
 
     def append_terminal_log(self, text: str) -> None:
         self._refresh_terminal_cwd()

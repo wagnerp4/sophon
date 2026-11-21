@@ -84,6 +84,7 @@ from cli.tui.permission import PermissionPrompt
 from cli.tui.choice import ChoicePrompt
 from cli.tui.setup_prompt import SETUP_SKIP, SetupPrompt
 from cli.tui.speech import ChatLogPane, ChatTranscript, PushToTalkMixin, TranscriptHostMixin
+from cli.host.launch import escape_controls, launch_dir
 from utils.device.env_bootstrap import sophon_project_root
 from utils.download.hf import (
     capture_hub_download_logs,
@@ -737,7 +738,7 @@ class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeN
         state = app.session_state
         if state is not None:
             return build_model_picker_entries(state)
-        root = app.cwd
+        root = sophon_project_root()  # presets live in the install root, not app.cwd
         current_preset = app.params.preset
         current_path: Path | None = None
         if app.params.model:
@@ -961,7 +962,7 @@ class ChatScreen(TranscriptHostMixin, SlashDispatchMixin, PushToTalkMixin, ModeN
         rate_state = {"t": time.monotonic(), "n": 0, "bps": 0.0, "grew_at": time.monotonic()}
         try:
             os.environ["TQDM_POSITION"] = "-1"
-            local_dir = resolve_preset_dir(preset_key, app.cwd)
+            local_dir = resolve_preset_dir(preset_key, sophon_project_root())
 
             def on_hub_status(text: str) -> None:
                 app.post_message(HubLogLine(f"hub: {text}"))
@@ -2013,7 +2014,7 @@ class SophonTuiApp(App):
         self.load_progress_bps = 0.0
         self.model_status_text = "loading..."
         self._action_started_at: float | None = None
-        self.cwd = sophon_project_root()
+        self.cwd = launch_dir()  # sophon-010: where the user started sophon
         self._stderr_prev = sys.__stderr__
         self._pending_system_lines: list[str] = []
         self._pending_assistant_lines: list = []
@@ -2503,7 +2504,8 @@ class SophonTuiApp(App):
         result = session.run(command)
         self.cwd = session.cwd
         if result.handled_as_cd:
-            self.call_from_thread(self._append_home_log, f"[dim]cwd -> {self.cwd}[/dim]")
+            shown = escape_controls(str(self.cwd))  # sinks here do not parse markup
+            self.call_from_thread(self._append_home_log, f"[dim]cwd -> {shown}[/dim]")
             return
         if result.output.strip():
             self.call_from_thread(self._append_home_log, result.output.rstrip())
